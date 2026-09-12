@@ -2207,7 +2207,7 @@ https://github.com/Code-Wizaard/KomakYaar
                                         await self.bot.set_message_reaction(
                                             chat_id, 
                                             message.message_id, 
-                                            [types.ReactionTypeEmoji('💀')]  # Malware detected
+                                            [types.ReactionTypeEmoji('👾')]  # Malware detected
                                         )
                                     else:
                                         await self.bot.set_message_reaction(
