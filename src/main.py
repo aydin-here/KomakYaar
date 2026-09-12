@@ -659,9 +659,8 @@ class KomakYaar():
             self.awaiting_db_restore = True
             await self.bot.reply_to(
                 message,
-                "📥 لطفاً فایل بکاپ دیتابیس (با پسوند `.db` یا `.sqlite`) را همین‌جا در پیوی ارسال کنید.\n\n"
-                "❌ برای لغو: /cancel_restore",
-                parse_mode="Markdown"
+                "📥 لطفاً فایل بکاپ دیتابیس (با پسوند .db یا .sqlite) را همین‌جا در پیوی ارسال کنید.\n\n"
+                "❌ برای لغو: /cancel_restore"
             )
 
         @self.bot.message_handler(commands=['cancel_restore'], func=lambda m: m.chat.type == "private")
@@ -682,9 +681,8 @@ class KomakYaar():
             if not file_name.endswith((".db", ".sqlite", ".sqlite3")):
                 await self.bot.reply_to(
                     message,
-                    "❌ فرمت فایل معتبر نیست! فقط فایل با پسوند `.db` یا `.sqlite` بفرستید.\n\n"
-                    "❌ برای لغو: /cancel_restore",
-                    parse_mode="Markdown"
+                    "❌ فرمت فایل معتبر نیست! فقط فایل با پسوند .db یا .sqlite بفرستید.\n\n"
+                    "❌ برای لغو: /cancel_restore"
                 )
                 return
             status_msg = await self.bot.reply_to(message, "⏳ در حال دریافت و بررسی فایل بکاپ...")
@@ -744,8 +742,8 @@ class KomakYaar():
                         pass
                 try:
                     await self.bot.edit_message_text(
-                        f"❌ خطا در بازیابی دیتابیس:\n`{str(e)[:1000]}`",
-                        message.chat.id, status_msg.message_id, parse_mode="Markdown"
+                        f"❌ خطا در بازیابی دیتابیس:\n{str(e)[:1000]}",
+                        message.chat.id, status_msg.message_id
                     )
                 except Exception:
                     await self.bot.reply_to(message, f"❌ خطا در بازیابی دیتابیس: {e}")
