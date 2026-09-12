@@ -3,10 +3,14 @@ if __name__ == "__main__":
 
 import aiosqlite
 import asyncio
+import os
+import shutil
+import sqlite3
+import traceback
 import time
 import random
 import secrets
-from telebot import types
+from telebot import types, ContinueHandling
 from telebot.async_telebot import AsyncTeleBot
 from pyrobale import Client
 from pyrobale.objects import Message, InputFile, User
@@ -437,6 +441,7 @@ class KomakYaar():
         self.raid_active = {}
         self.captchas = {}
         self.lock_panel_origin = {}
+        self.awaiting_db_restore = False
         self.setup_events()
     
     async def apply_group_permissions(self, chat_id):
@@ -593,12 +598,14 @@ class KomakYaar():
             "gif": "گیف", "spam": "اسپم", "flood": "فلاد", "inline": "اینلاین",
             "raid": "حمله", "captcha": "کپچا",
         }
+        buttons = []
         for latin, persian in locks.items():
             on = int(await self.db.get_group_setting(chat_id, latin.upper() + "_LOCK", 0)) == 1
-            kb.add(types.InlineKeyboardButton(
+            buttons.append(types.InlineKeyboardButton(
                 f"قفل {persian} {'✅' if on else '❌'}",
                 callback_data=f"lock_{latin}:" + ("off" if on else "on")
             ))
+        kb.add(*buttons)
         return kb
 
     async def open_lock_panel(self, chat_id):
@@ -639,6 +646,111 @@ class KomakYaar():
 
     def setup_events(self):
         check = lambda require_admin=False: handler_check(self.bot, self.db, self.anti_spam, require_admin)
+
+        # ===== Owner-only DB restore (private chat) =====
+        # Registered first so document updates reach it before the text-based
+        # owner handlers below (whose `m.text.startswith(...)` filters would
+        # raise AttributeError on document messages and abort handler dispatch).
+        @self.bot.message_handler(commands=['restore_db'], func=lambda m: m.chat.type == "private")
+        async def ask_db_restore(message: types.Message):
+            if message.from_user.id != OWNER_ID:
+                await self.bot.reply_to(message, "تو اونر بات نیستی")
+                return
+            self.awaiting_db_restore = True
+            await self.bot.reply_to(
+                message,
+                "📥 لطفاً فایل بکاپ دیتابیس (با پسوند `.db` یا `.sqlite`) را همین‌جا در پیوی ارسال کنید.\n\n"
+                "❌ برای لغو: /cancel_restore",
+                parse_mode="Markdown"
+            )
+
+        @self.bot.message_handler(commands=['cancel_restore'], func=lambda m: m.chat.type == "private")
+        async def cancel_db_restore(message: types.Message):
+            if message.from_user.id != OWNER_ID:
+                return
+            if self.awaiting_db_restore:
+                self.awaiting_db_restore = False
+                await self.bot.reply_to(message, "❌ بازیابی دیتابیس لغو شد.")
+            else:
+                await self.bot.reply_to(message, "هیچ درخواست بازیابی فعالی وجود ندارد.")
+
+        @self.bot.message_handler(func=lambda m: m.chat.type == "private" and m.from_user and m.from_user.id == OWNER_ID, content_types=['document'])
+        async def handle_db_restore_file(message: types.Message):
+            if not self.awaiting_db_restore:
+                return ContinueHandling()
+            file_name = (message.document.file_name or "").lower()
+            if not file_name.endswith((".db", ".sqlite", ".sqlite3")):
+                await self.bot.reply_to(
+                    message,
+                    "❌ فرمت فایل معتبر نیست! فقط فایل با پسوند `.db` یا `.sqlite` بفرستید.\n\n"
+                    "❌ برای لغو: /cancel_restore",
+                    parse_mode="Markdown"
+                )
+                return
+            status_msg = await self.bot.reply_to(message, "⏳ در حال دریافت و بررسی فایل بکاپ...")
+            tmp_path = None
+            try:
+                file_info = await self.bot.get_file(message.document.file_id)
+                file_bytes = await self.bot.download_file(file_info.file_path)
+                if not file_bytes.startswith(b"SQLite format 3\x00"):
+                    await self.bot.edit_message_text(
+                        "❌ فایل ارسال‌شده یک دیتابیس SQLite معتبر نیست!",
+                        message.chat.id, status_msg.message_id
+                    )
+                    return
+                tmp_path = DB_PATH + ".restore_tmp"
+                with open(tmp_path, "wb") as f:
+                    f.write(file_bytes)
+                # Validate: must open as sqlite and contain the bot's core tables
+                try:
+                    con = sqlite3.connect(tmp_path)
+                    cur = con.cursor()
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='table';")
+                    tables = {row[0] for row in cur.fetchall()}
+                    con.close()
+                except Exception:
+                    tables = set()
+                required_tables = {"groups", "group_settings"}
+                if not required_tables.issubset(tables):
+                    os.remove(tmp_path)
+                    tmp_path = None
+                    await self.bot.edit_message_text(
+                        "❌ فایل ارسال‌شده بکاپ معتبر کمک‌یار نیست (جداول اصلی پیدا نشد)!",
+                        message.chat.id, status_msg.message_id
+                    )
+                    return
+                # Backup current db before overwriting
+                if os.path.exists(DB_PATH):
+                    backup_path = f"{DB_PATH}.bak.{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    shutil.copy2(DB_PATH, backup_path)
+                # Atomic replace
+                os.replace(tmp_path, DB_PATH)
+                tmp_path = None
+                self.awaiting_db_restore = False
+                # Ensure any missing tables from newer versions exist
+                try:
+                    await self.db.init_db()
+                except Exception:
+                    pass
+                await self.bot.edit_message_text(
+                    "✅ دیتابیس با موفقیت بازیابی شد و جایگزین دیتابیس فعلی شد!",
+                    message.chat.id, status_msg.message_id
+                )
+            except Exception as e:
+                if tmp_path and os.path.exists(tmp_path):
+                    try:
+                        os.remove(tmp_path)
+                    except Exception:
+                        pass
+                try:
+                    await self.bot.edit_message_text(
+                        f"❌ خطا در بازیابی دیتابیس:\n`{str(e)[:1000]}`",
+                        message.chat.id, status_msg.message_id, parse_mode="Markdown"
+                    )
+                except Exception:
+                    await self.bot.reply_to(message, f"❌ خطا در بازیابی دیتابیس: {e}")
+                await send_error_to_owner(f"Error in db restore: {e}\n{traceback.format_exc()}", OWNER_ID, self.bot, "DB_RESTORE_ERROR")
+
         @self.bot.message_handler(func=lambda m: m.text == "فعال شو")
         async def cmd_startgroup(message):
             if await self.db.is_group_blocked(message.chat.id):
@@ -954,7 +1066,7 @@ class KomakYaar():
                         reply_to = None
                         break
             if is_comment:
-                await self.db.lock_post(message.reply_to.chat.id, message.reply_to.id)
+                await self.db.lock_post(message.reply_to_message.chat.id, message.reply_to_message.message_id)
                 await self.bot.reply_to(message, "این پست قفل شده است 🔒\n دیگر اعضای عادی دسترسی ارسال کامنت زیر این پست را ندارد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE",1)) == 1 else "کیر کردم تو این پست حالا خایه داری کامنت بذار این زیر")
             else:
                 await self.bot.reply_to(message, "پیام شما به هیچ پستی اشاره نمیکند، لطفا زیر پستی که میخواهید قفل شود این دستور را کامنت کنید")
@@ -1287,7 +1399,7 @@ https://github.com/Code-Wizaard/KomakYaar
             
                 token = result_id.split(":", 1)[1]
                 infos = token.split("#")[1]
-                sender_id = infos.split(":")[0]
+                sender_id = int(infos.split(":")[0])
                 receiver_username = infos.split(":")[1]
                 target_chat = None
                 try:
@@ -1779,10 +1891,10 @@ Made with ❤️ by Code-Wizaard""",
 https://github.com/Code-Wizaard/KomakYaar
 """, disable_web_page_preview=True)
 
-        @self.bot.message_handler(func= lambda m: m.from_user.id == OWNER_ID and m.text.startswith("db:"))
+        @self.bot.message_handler(func= lambda m: m.from_user and m.from_user.id == OWNER_ID and (m.text or "").startswith("db:"))
         async def execute_to_db(message):
             try:
-                query = message.text.split(":")[1]
+                query = message.text.split(":", 1)[1]
                 async with aiosqlite.connect(DB_PATH) as con:
                     cur = await con.execute(query)
                     rows = await cur.fetchall()
@@ -1790,10 +1902,9 @@ https://github.com/Code-Wizaard/KomakYaar
                         await self.bot.reply_to(message, f"Hello Master, These are the responses : \n {json.dumps(rows, ensure_ascii=False)}")
                     else:
                         await con.commit()
+                        await self.bot.reply_to(message, "Hello Master, query executed successfully ✅")
             except Exception as e:
                 await self.bot.reply_to(message, f"ریدی ارور گرفتم \n {e}")
-            finally:
-                await con.close()
 
         @self.bot.message_handler(func= lambda m: m.from_user.id == OWNER_ID and m.text == ";id;")
         async def id_informations_owner(message: types.Message):
@@ -2277,7 +2388,7 @@ https://github.com/Code-Wizaard/KomakYaar
                         return
 
                     if text == "حذف" and await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                        self.bot.delete_message(chat_id, message.reply_to_message.message_id)
+                        await self.bot.delete_message(chat_id, message.reply_to_message.message_id)
                         msg = await self.bot.reply_to(message, "پیام پاک شد 🗑️")
                         await asyncio.sleep(4)
                         await self.bot.delete_message(msg.chat.id, msg.message_id)
@@ -2398,16 +2509,16 @@ https://github.com/Code-Wizaard/KomakYaar
                         parts = text.split()
                         if len(parts) >= 2 and parts[1].isdigit():
                             mins = int(parts[1])
-                            if mins == "شو":
-                                await self.bot.restrict_chat_member(chat_id, target_id, can_send_messages=False)
-                                await self.db.add_punishment(chat_id, target_id, "mute", "0")
-                                await self.bot.reply_to(message, f"🔇 کاربر سکوت داده شد.")
-                            else:
-                                await self.bot.restrict_chat_member(chat_id, target_id,
-                                                    until_date=int(time.time()+mins*60),
-                                                    can_send_messages=False)
-                                await self.db.add_punishment(chat_id, target_id, "mute", int(time.time()+mins*60))
-                                await self.bot.reply_to(message, f"🔇 کاربر سکوت داده شد برای {mins} دقیقه.")
+                            await self.bot.restrict_chat_member(chat_id, target_id,
+                                                until_date=int(time.time()+mins*60),
+                                                can_send_messages=False)
+                            await self.db.add_punishment(chat_id, target_id, "mute", int(time.time()+mins*60))
+                            await self.bot.reply_to(message, f"🔇 کاربر سکوت داده شد برای {mins} دقیقه.")
+                        else:
+                            # Permanent mute: covers bare "سکوت", "خفه" and "خفه شو"
+                            await self.bot.restrict_chat_member(chat_id, target_id, can_send_messages=False)
+                            await self.db.add_punishment(chat_id, target_id, "mute", "0")
+                            await self.bot.reply_to(message, f"🔇 کاربر سکوت داده شد.")
 
                     elif (text.startswith("اخطار")):
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):

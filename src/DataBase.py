@@ -397,7 +397,7 @@ class DataBase():
             
             cur = await con.execute("SELECT warnings FROM warnings WHERE group_id=? AND user_id=?", (group_id, user_id))
             row = await cur.fetchone()
-            return row[0] if row else 3
+            return row[0] if row else 0
         
     async def get_comment_message(self, group_id):
         async with self._db() as con:
