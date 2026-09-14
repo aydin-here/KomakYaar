@@ -1,13 +1,13 @@
-import os
-import traceback
 import datetime
-from dotenv import load_dotenv
 import functools
+import os
 import random
-from telebot.asyncio_helper import ApiTelegramException
-from telebot import types
-import time
 import re
+import time
+import traceback
+
+from dotenv import load_dotenv
+from telebot import types
 
 load_dotenv()
 API_TOKEN = os.getenv("TOKEN")
@@ -15,12 +15,12 @@ BALE_TOKEN = os.getenv("BALE_TOKEN")
 DB_PATH = os.getenv("DB_PATH", "groups.db")
 SWEARS_PATH = os.getenv("SWEARS_PATH", "swears.txt")
 OWNER_ID = int(os.getenv("OWNER_ID"))
-VERSION = "2.9.12"
+VERSION = "2.11.12"
 BOT_CHANNEL = "@KomakYaaar"
 BOT_GROUP = "@KomakYaarGap"
 
 # حداکثر حجم فایل (بایت) که ضدویروس برای بررسی دانلود می‌کند؛ فایل‌های بزرگ‌تر بدون دانلود رد می‌شوند
-MAX_ANTIVIRUS_FILE_SIZE = int(os.getenv("MAX_ANTIVIRUS_FILE_SIZE", 1_000_000))
+MAX_ANTIVIRUS_FILE_SIZE = int(os.getenv("MAX_ANTIVIRUS_FILE_SIZE", "1000000"))
 
 RUDE_ADMIN_MESSAGES = [
     "داداش تو ادمینی؟ برو باباتو ادمین کن بعد بیا اینجا حرف بزن 😏",
@@ -71,7 +71,7 @@ def convert_digit(text: str) -> str:
     persian_arabic_digits = '۰۱۲۳۴۵۶۷۸۹'
     persian_arabic_digits += '٠١٢٣٤٥٦٧٨٩'
     english_digits = '0123456789' * 2
-    
+
     translation_table = str.maketrans(persian_arabic_digits, english_digits)
     return int(text.translate(translation_table))
 
@@ -102,14 +102,14 @@ async def send_error_to_owner(error_text, owner_id, bot, error_type="ERROR"):
     try:
         error_message = f"""🚨 **{parse_strip(error_type)}**
 
-⏰ {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ {datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}
 
 ❌ خطا:
 ```{error_text[:3000]}```
 """
         await bot.send_message(owner_id, error_message, parse_mode="Markdown")
-    except:
-        print(f"Error sending to owner: {error_text}")
+    except Exception as e:
+        print(f"Error sending to owner: {error_text}: {e}")
 
 def handler_check(bot, db, anti_spam, require_admin: bool = False):
     def decorator(func):
@@ -129,7 +129,7 @@ def handler_check(bot, db, anti_spam, require_admin: bool = False):
                 # فعال بودن گروه
                 if not await db.is_group_active(chat_id):
                     return
-                
+
                 # ==================== ضد اسپم ====================
                 if anti_spam:
                     spam_text = text
@@ -143,14 +143,14 @@ def handler_check(bot, db, anti_spam, require_admin: bool = False):
 
                     spam_result = await anti_spam.check(chat_id, user_id, spam_text)
                     if spam_result[0] is not None:
-                        violation, count = spam_result
+                        violation, _count = spam_result
                         try:
                             await bot.delete_message(chat_id, message.message_id)
-                        except:
+                        except Exception:
                             pass
                         try:
                             await bot.restrict_chat_member(chat_id, user_id, until_date=int(time.time()) + 300, can_send_messages=False)
-                        except:
+                        except Exception:
                             pass
                         anti_spam.reset_user(chat_id, user_id)
                         if not await db.is_admin(chat_id, user_id, sender_chat_id):
@@ -183,7 +183,7 @@ def handler_check(bot, db, anti_spam, require_admin: bool = False):
                     if int(await db.get_group_setting(chat_id, "PUBLIC_COMMANDS", 1)) != 1 and not await db.is_admin(chat_id, user_id, sender_chat_id):
                         return
 
-                
+
 
                 # اجرای handler اصلی
                 return await func(message, *args, **kwargs)
@@ -193,7 +193,7 @@ def handler_check(bot, db, anti_spam, require_admin: bool = False):
                 print(f"❌ Error in {func.__name__}(): {e}")
                 try:
                     await send_error_to_owner(error_trace, OWNER_ID, bot, f"Handler: {func.__name__}")
-                except:
+                except Exception:
                     pass
 
         return wrapper

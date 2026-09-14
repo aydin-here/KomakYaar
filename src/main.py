@@ -1,36 +1,40 @@
 if __name__ == "__main__":
     from DataBase import DataBase
 
-import aiosqlite
 import asyncio
+import base64
+import datetime
+import hashlib
+import json
+import logging
 import os
+import random
+import re
+import secrets
 import shutil
 import sqlite3
-import traceback
 import time
-import random
-import secrets
-from telebot import types, ContinueHandling
-from telebot.async_telebot import AsyncTeleBot
-from pyrobale import Client
-from pyrobale.objects import Message, InputFile, User
-from pyrobale.objects.enums import ChatType
-import logging
-import json
-import re
-from utils import *
-import datetime
-import base64
-import hashlib
-from cryptography.fernet import Fernet
-from anti_spam import AntiSpam
-from profanity_checker import ProfanityDetector
-from anti_virus import AntiVirus
-import aiohttp
+import traceback
 from io import BytesIO
+
+import aiohttp
+import aiosqlite
+from cryptography.fernet import Fernet
+from pyrobale import Client
+from pyrobale.objects import InputFile, Message, User
+from pyrobale.objects.enums import ChatType
+from telebot import ContinueHandling, types
+from telebot.async_telebot import AsyncTeleBot
+
+from anti_spam import AntiSpam
+from anti_virus import AntiVirus
+from i18n import DEFAULT_LANGUAGE, SUPPORTED_LANGUAGES, cmd_match, cmd_startswith, t
+from profanity_checker import ProfanityDetector
+from utils import *
+
 logger = logging.getLogger('TeleBot').setLevel(logging.INFO)
 
-class KomakYaar():
+class KomakYaar:
     def __init__(self):
         self.bot = AsyncTeleBot(API_TOKEN)
         self.me = asyncio.run(self.bot.get_me())
@@ -118,6 +122,10 @@ class KomakYaar():
             },
             "help_faq": {
                 "title": "❓ سوالات متداول",
+                "direct": True,
+            },
+            "help_stats": {
+                "title": "📊 آمار و رتبه\u200cبندی",
                 "direct": True,
             },
         }
@@ -406,8 +414,25 @@ class KomakYaar():
                 "• از قفل‌های لینک، فحش و فوروارد استفاده کنید\n"
                 "• کلمات نامناسب را با `مسدود کلمه` اضافه کنید\n\n"
                 "**۵. آیا بات اوپن سورس است؟**\n"
-                "• بله! کد بات در گیت‌هاب موجود است:\n"
+                "• بله! کد بات در گیت\u200cهاب موجود است:\n"
                 "• https://github.com/Code-Wizaard/KomakYaar"
+            ),
+
+            "help_stats": (
+                "📊 **آمار و رتبه\u200cبندی**\n\n"
+                "این بخش به شما امکان مشاهده فعال\u200cترین اعضای گروه را می\u200cدهد.\n\n"
+                "**دستورات:**\n"
+                "• `آمار` - نمایش لیست ۱۰ فعال\u200cترین عضو گروه\n"
+                "• `آمار من` - مشاهده آمار شخصی شما (تعداد پیام، اخطارها، رتبه)\n"
+                "• `ریست آمار` (ادمین) - ریست کردن تمام آمار گروه\n\n"
+                "**نکات:**\n"
+                "• هر پیامی که ارسال کنید، یک واحد به آمار شما اضافه می\u200cشود\n"
+                "• اگر پیام شما به دلیل اسپم یا فحش حذف شود، یک واحد از آمار شما کم می\u200cشود\n"
+                "• پیام\u200cهای ادمین\u200cها شمارش نمی\u200cشوند\n\n"
+                "**تنظیم زبان:**\n"
+                "• `تنظیم زبان fa` - تغییر زبان گروه به فارسی\n"
+                "• `تنظیم زبان en` - تغییر زبان گروه به انگلیسی\n\n"
+                "💡 در پیوی ربات هم می\u200cتوانید با دستور `/language` یا `زبان` زبان شخصی خود را تنظیم کنید."
             ),
         }
 
@@ -442,7 +467,19 @@ class KomakYaar():
         self.captchas = {}
         self.lock_panel_origin = {}
         self.awaiting_db_restore = False
+        self.user_languages = {}  # user_id -> language code (private chat preference)
         self.setup_events()
+
+    async def get_lang(self, chat_id):
+        """Get the language code for a group (from group_settings)."""
+        lang = await self.db.get_group_setting(chat_id, "LANGUAGE", DEFAULT_LANGUAGE)
+        if lang not in SUPPORTED_LANGUAGES:
+            lang = DEFAULT_LANGUAGE
+        return lang
+
+    def get_user_lang(self, user_id):
+        """Get the language preference for a private chat user."""
+        return self.user_languages.get(user_id, DEFAULT_LANGUAGE)
     
     async def apply_group_permissions(self, chat_id):
         """Apply full permissions to the group based on its settings"""
@@ -482,7 +519,7 @@ class KomakYaar():
         text = text.replace("{chat}", message.chat.title)
         try:
             member_count = await self.bot.get_chat_member_count(message.chat.id)
-        except:
+        except Exception:
             member_count = "نامشخص"
         text = text.replace("{members}", str(member_count))
         await self.bot.send_message(message.chat.id, text)
@@ -505,6 +542,7 @@ class KomakYaar():
 
     async def start_captcha(self, message, user):
         chat_id = message.chat.id
+        lang = await self.get_lang(chat_id)
         key = (chat_id, user.id)
         timeout = int(await self.db.get_group_setting(chat_id, "CAPTCHA_TIMEOUT", 300))
         try:
@@ -530,7 +568,7 @@ class KomakYaar():
             kb.add(types.InlineKeyboardButton(str(o), callback_data=f"captcha:{chat_id}:{token}:{o}"))
         msg = await self.bot.send_message(
             chat_id,
-            f"[{user.first_name}](tg://user?id={user.id}) برای اثبات انسان بودن، حاصل جمع را انتخاب کن:\n\n{a} + {b} = ؟",
+            f"[{user.first_name}](tg://user?id={user.id}) " + ("برای اثبات انسان بودن، حاصل جمع را انتخاب کن" if lang == "fa" else "Choose the sum to prove you're human") + f":\n\n{a} + {b} = ؟",
             parse_mode="Markdown",
             reply_markup=kb
         )
@@ -554,6 +592,7 @@ class KomakYaar():
             self.captchas.pop(key, None)
 
     async def captcha_success(self, chat_id, user_id, user_name):
+        lang = await self.get_lang(chat_id)
         try:
             await self.bot.restrict_chat_member(
                 chat_id, user_id,
@@ -565,7 +604,7 @@ class KomakYaar():
             )
         except Exception:
             pass
-        await self.bot.send_message(chat_id, f"[{user_name}](tg://user?id={user_id}) تایید شد! خوش اومدی", parse_mode="Markdown")
+        await self.bot.send_message(chat_id, t("captcha_correct_welcome", lang, name=user_name, id=user_id), parse_mode="Markdown")
 
     def build_pretty_keyboard(self, items, back_buttons=None):
         """Keyboard with a mixed layout: first and last items get full-width rows,
@@ -592,17 +631,15 @@ class KomakYaar():
         return kb
 
     async def build_lock_panel(self, chat_id, row_width=5):
+        lang = await self.get_lang(chat_id)
         kb = types.InlineKeyboardMarkup(row_width=row_width)
-        locks = {
-            "link": "لینک", "forward": "فوروارد", "swear": "فحش", "group": "گروه",
-            "gif": "گیف", "spam": "اسپم", "flood": "فلاد", "inline": "اینلاین",
-            "raid": "حمله", "captcha": "کپچا",
-        }
+        lock_keys = ["link", "forward", "swear", "group", "gif", "spam", "flood", "inline", "raid", "captcha"]
         buttons = []
-        for latin, persian in locks.items():
+        for latin in lock_keys:
             on = int(await self.db.get_group_setting(chat_id, latin.upper() + "_LOCK", 0)) == 1
+            lock_name = t(f"lock_name_{latin}", lang)
             buttons.append(types.InlineKeyboardButton(
-                f"قفل {persian} {'✅' if on else '❌'}",
+                f"{lock_name} {'✅' if on else '❌'}",
                 callback_data=f"lock_{latin}:" + ("off" if on else "on")
             ))
         kb.add(*buttons)
@@ -612,35 +649,37 @@ class KomakYaar():
         """Build the lock panel with extended row_width and a back button to the global panel.
         The origin is remembered so toggles re-render in place."""
         self.lock_panel_origin[chat_id] = "global"
+        lang = await self.get_lang(chat_id)
         lock_kb = await self.build_lock_panel(chat_id, row_width=5)
-        lock_kb.add(types.InlineKeyboardButton("🔙 برگشت به پنل جامع", callback_data="panel_main"))
+        lock_kb.add(types.InlineKeyboardButton(t("panel_back_to_main", lang), callback_data="panel_main"))
         return lock_kb
 
     async def build_global_panel(self, chat_id):
-        punishment_map = {"kick": "کیک", "ban": "بن", "mute": "میوت"}
+        lang = await self.get_lang(chat_id)
+        punishment_map = {"kick": t("punishment_kick", lang), "ban": t("punishment_ban", lang), "mute": t("punishment_mute", lang)}
 
-        lines = ["📊 **پنل جامع مدیریت گروه**\n"]
-        lines.append("⚙️ **تنظیمات:**")
+        lines = [t("panel_main_title", lang)]
+        lines.append(t("panel_settings_header", lang))
         polite = int(await self.db.get_group_setting(chat_id, "POLITE_MODE", 1)) == 1
         public = int(await self.db.get_group_setting(chat_id, "PUBLIC_COMMANDS", 1)) == 1
         raid_threshold = await self.db.get_group_setting(chat_id, "RAID_THRESHOLD", 5)
         raid_window = await self.db.get_group_setting(chat_id, "RAID_WINDOW", 30)
         warn_max = await self.db.get_group_setting(chat_id, "WARN_MAXIMUM", 3)
-        warn_punishment = punishment_map.get(await self.db.get_group_setting(chat_id, "WARN_PUNISHMENT", "kick"), "کیک")
-        invite_max = await self.db.get_group_setting(chat_id, "invite_maximum", "نامحدود")
-        lines.append(f"• لحن بات: {'باادب 🎩' if polite else 'بی‌ادب 😈'}")
-        lines.append(f"• دستورات عمومی: {'روشن ✅' if public else 'خاموش ❌'}")
-        lines.append(f"• سقف حمله: {raid_threshold} | بازه حمله: {raid_window} ثانیه")
-        lines.append(f"• سقف اخطار: {warn_max} | مجازات اخطار: {warn_punishment}")
-        lines.append(f"• حداکثر دعوت: {invite_max}")
+        warn_punishment = punishment_map.get(await self.db.get_group_setting(chat_id, "WARN_PUNISHMENT", "kick"), t("punishment_kick", lang))
+        invite_max = await self.db.get_group_setting(chat_id, "invite_maximum", t("panel_unlimited", lang))
+        lines.append(f"• {t('panel_bot_tone', lang)}: {t('panel_tone_polite', lang) if polite else t('panel_tone_rude', lang)}")
+        lines.append(f"• {t('panel_public_cmds', lang)}: {t('panel_on', lang) if public else t('panel_off', lang)}")
+        lines.append(f"• {t('panel_raid_info', lang)}: {raid_threshold} | {t('panel_raid_window', lang)}: {raid_window} {t('panel_seconds', lang)}")
+        lines.append(f"• {t('panel_warn_max', lang)}: {warn_max} | {t('panel_warn_punish', lang)}: {warn_punishment}")
+        lines.append(f"• {t('panel_invite_max', lang)}: {invite_max}")
         text = "\n".join(lines)
 
         kb = self.build_pretty_keyboard([
-            ("🔒 قفل‌ها", "panel_locks"),
-            (f"لحن باادب {'✅' if polite else '❌'}", "panel_polite"),
-            (f"دستورات عمومی {'✅' if public else '❌'}", "panel_public"),
-            ("📖 راهنمای گام به گام", "help_main"),
-            ("بستن پنل", "close_panel"),
+            (t("panel_locks_btn", lang), "panel_locks"),
+            (f"{t('panel_polite_btn', lang)} {'✅' if polite else '❌'}", "panel_polite"),
+            (f"{t('panel_public_btn', lang)} {'✅' if public else '❌'}", "panel_public"),
+            (t("panel_guide_btn", lang), "help_main"),
+            (t("panel_close_btn", lang), "close_panel"),
         ])
         return text, kb
 
@@ -719,7 +758,7 @@ class KomakYaar():
                     return
                 # Backup current db before overwriting
                 if os.path.exists(DB_PATH):
-                    backup_path = f"{DB_PATH}.bak.{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    backup_path = f"{DB_PATH}.bak.{datetime.datetime.now(tz=datetime.timezone.utc).strftime('%Y%m%d_%H%M%S')}"
                     shutil.copy2(DB_PATH, backup_path)
                 # Atomic replace
                 os.replace(tmp_path, DB_PATH)
@@ -749,226 +788,273 @@ class KomakYaar():
                     await self.bot.reply_to(message, f"❌ خطا در بازیابی دیتابیس: {e}")
                 await send_error_to_owner(f"Error in db restore: {e}\n{traceback.format_exc()}", OWNER_ID, self.bot, "DB_RESTORE_ERROR")
 
-        @self.bot.message_handler(func=lambda m: m.text == "فعال شو")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "activate"))
         async def cmd_startgroup(message):
             if await self.db.is_group_blocked(message.chat.id):
                 return
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if await self.db.is_group_active(message.chat.id):
-                await self.bot.reply_to(message, "گروه از قبل فعال شده بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "گروه که از قبل فعال بود کصخل")
+                await self.bot.reply_to(message, t("group_already_active" if polite else "group_already_active_rude", lang))
                 return
             if not await self.db.is_admin(message.chat.id, message.from_user.id, self.sender_chat_id(message)):
-                await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "اخه تو ادمینی؟")
+                await self.bot.reply_to(message, t("no_admin_permission" if polite else "no_admin_permission_rude", lang))
                 return
             await self.db.ensure_group(message.chat.id)
             await self.db.set_group_active(message.chat.id)
-            await self.bot.reply_to(message, "✅ گروه فعال شد و بات آماده مدیریت است!")
+            await self.bot.reply_to(message, t("group_activated", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "سیکتیر کن")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "leave"))
         @check(require_admin=True)
         async def leaver(message):
-            await self.bot.reply_to(message, "ناراحت شدم، میرم سیکتیر کنم")
+            lang = await self.get_lang(message.chat.id)
+            await self.bot.reply_to(message, t("bot_leave", lang))
             await self.bot.leave_chat(message.chat.id)
 
 
-        @self.bot.message_handler(func=lambda m: m.text == "راهنما")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "help"))
         @check()
         async def send_help(message):
+            lang = await self.get_lang(message.chat.id)
             try:
                 await self.bot.send_message(message.from_user.id, HELP_TEXT, parse_mode="Markdown", reply_markup=self.help_keyboard)
                 if message.chat.type != "private":
-                    await self.bot.reply_to(message, "📬 پنل راهنما به پیوی شما ارسال شد!")
-            except:
-                await self.bot.reply_to(message, "⚠️ نمی‌تونم پیوی شما پیام بفرستم، لطفا دایرکت ربات رو باز کنید.")
+                    await self.bot.reply_to(message, t("help_sent_pv", lang))
+            except Exception:
+                await self.bot.reply_to(message, t("help_pv_blocked", lang))
 
 
-        @self.bot.message_handler(func=lambda m: m.text == "ریست")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "reset"))
         @check(require_admin=True)
         async def reset_bot_in_group(message):
-            msg = await self.bot.reply_to(message, "حله، الان کل رکورد گروه (بجز فیلتر ها) رو پاک و بازنویسی از صفر میکنم، انگار که هیچ اتفاقی نیوفتاده")
+            lang = await self.get_lang(message.chat.id)
+            msg = await self.bot.reply_to(message, t("reset_start", lang))
             await self.db.reset_group(message.chat.id)
-            await self.bot.edit_message_text("خب، تموم شد، همه چی ریست شد", message.chat.id, msg.id)
+            await self.bot.edit_message_text(t("reset_done", lang), message.chat.id, msg.id)
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("تنظیم حداکثر دعوت"))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "set_max_invite") is not None or m.text.startswith("تنظیم حداکثر دعوت"))
         @check(require_admin=True)
         async def change_maximum(message:types.Message):
-            if message.text[len("تنظیم حداکثر دعوت"):].strip().isdigit():
-                maximum = int(message.text[len("تنظیم حداکثر دعوت"):].strip())
+            lang = await self.get_lang(message.chat.id)
+            remainder = cmd_startswith(message.text, "set_max_invite")
+            if remainder is None:
+                remainder = message.text[len("تنظیم حداکثر دعوت"):].strip()
+            if remainder.isdigit():
+                maximum = int(remainder)
                 await self.db.set_group_setting(message.chat.id, "invite_maximum", maximum)
                 if bool(int(await self.db.get_group_setting(message.chat.id, "creates_request", 0))):
                     await self.db.delete_group_setting(message.chat.id, "creates_request")
-                await self.bot.reply_to(message, f"حداکثر تعداد دعوت به {maximum} دعوت تغییر پیدا کرد")
+                await self.bot.reply_to(message, t("invite_max_set", lang, maximum=maximum))
             else:
-                await self.bot.reply_to(message, "کصخل اشتباه نوشتی")
+                await self.bot.reply_to(message, t("invite_max_invalid", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل فحش")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "swear_lock_on"))
         @check(require_admin=True)
         async def active_swear_strict(message:types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "SWEAR_LOCK", 0)) in [-1, 1]:
                 await self.db.set_group_setting(message.chat.id, "SWEAR_LOCK", 1)
-                await self.bot.reply_to(message, "ضدفحش در حال حاضر نیز فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "همینطوریشم فعال هست ستونم")
+                await self.bot.reply_to(message, t("swear_lock_on_already" if polite else "swear_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "SWEAR_LOCK", 1)
-                await self.bot.reply_to(message, "قفل فعال شد")
+                await self.bot.reply_to(message, t("swear_lock_on", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن فحش")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "swear_lock_off"))
         @check(require_admin=True)
-        async def active_swear_strict(message:types.Message):
+        async def deactivate_swear(message:types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "SWEAR_LOCK", 0)) in [-1, 0]:
                 await self.db.set_group_setting(message.chat.id, "SWEAR_LOCK", 0)
-                await self.bot.reply_to(message, "ضدفحش در حال حاضر نیز غیرفعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "همینطوریشم غیرفعال هست ستونم")
+                await self.bot.reply_to(message, t("swear_lock_off_already" if polite else "swear_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "SWEAR_LOCK", 0)
-                await self.bot.reply_to(message, "قفل غیرفعال شد")
+                await self.bot.reply_to(message, t("swear_lock_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل گروه")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "group_lock_on"))
         @check(require_admin=True)
         async def lock_group(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "GROUP_LOCK", 0)) == 0:
                 await self.db.set_group_setting(message.chat.id, "GROUP_LOCK", 1)
-                await self.bot.reply_to(message, "گروه با موفقیت قفل شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "کسی خایه داره پیام بده")
+                await self.bot.reply_to(message, t("group_lock_on" if polite else "group_lock_on_rude", lang))
                 await self.apply_group_permissions(message.chat.id)
             else:
-                await self.bot.reply_to(message, "گروه از قبل نیز قفل بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "گروه که از قبل قفل بود کصخل")
+                await self.bot.reply_to(message, t("group_lock_on_already" if polite else "group_lock_on_already_rude", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن گروه")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "group_lock_off"))
         @check(require_admin=True)
         async def unlock_group(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "GROUP_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, "گروه از قبل نیز باز بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "گروه که از قبل باز بود کصخل")
+                await self.bot.reply_to(message, t("group_lock_off_already" if polite else "group_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "GROUP_LOCK", 0)
-                await self.bot.reply_to(message, "گروه با موفقیت باز شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "راحت گوه بخورید")
+                await self.bot.reply_to(message, t("group_lock_off" if polite else "group_lock_off_rude", lang))
                 await self.apply_group_permissions(message.chat.id)
 
-        @self.bot.message_handler(func=lambda m: m.text == "بی ادب شو")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "be_rude"))
         @check(require_admin=True)
         async def turn_rude(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
             if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1:
                 await self.db.set_group_setting(message.chat.id, "POLITE_MODE", 0)
-                await self.bot.reply_to(message, "وقتشه کیری حرف بزنم")
+                await self.bot.reply_to(message, t("rude_changed", lang))
             else:
-                await self.bot.reply_to(message, "کصمغز منکه از قبلشم بی ادب بودم")
+                await self.bot.reply_to(message, t("rude_already", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text in ["باادب شو", "با ادب شو"])
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "be_polite"))
         @check(require_admin=True)
         async def turn_polite(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
             if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1:
-                await self.bot.reply_to(message, "بنده از قبل باادب بوده‌ام")
+                await self.bot.reply_to(message, t("polite_already", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "POLITE_MODE", 1)
-                await self.bot.reply_to(message, "ادب کیری مهمه، من باادب میشم")
+                await self.bot.reply_to(message, t("polite_changed", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل لینک")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "link_lock_on"))
         @check(require_admin=True)
         async def link_blocker(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "LINK_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, "ضدلینک در حال حاضر نیز فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "خیالت راحت باشه نمیگفتی هم لینکارو پاک میکردم")
+                await self.bot.reply_to(message, t("link_lock_on_already" if polite else "link_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "LINK_LOCK", 1)
-                await self.bot.reply_to(message, "ضدلینک فعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "ردیفه ستون اوکیش کردم")
+                await self.bot.reply_to(message, t("link_lock_on", lang))
 
-        @self.bot.message_handler(func= lambda m: m.text == "بازکردن لینک")
+        @self.bot.message_handler(func= lambda m: cmd_match(m.text, "link_lock_off"))
         @check(require_admin=True)
         async def link_unblocking(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "LINK_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, "ضدلینک از قبل نیز غیرفعال بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "باع، قفل که قبلشم باز بود")
+                await self.bot.reply_to(message, t("link_lock_off_already" if polite else "link_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "LINK_LOCK", 0)
-                await self.bot.reply_to(message, "ضدلینک غیرفعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "انقدر لینکو باز کردم تا جر خورد (اوکی)")
+                await self.bot.reply_to(message, t("link_lock_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل فوروارد")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "forward_lock_on"))
         @check(require_admin=True)
         async def forward_blocker(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "FORWARD_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, "ضدفوروارد در حال حاضر نیز فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "خیالت راحت باشه نمیگفتی هم فورواردارو پاک میکردم")
+                await self.bot.reply_to(message, t("forward_lock_on_already" if polite else "forward_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "FORWARD_LOCK", 1)
-                await self.bot.reply_to(message, "ضدفوروارد فعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "ردیفه ستون اوکیش کردم")
+                await self.bot.reply_to(message, t("forward_lock_on", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن فوروارد")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "forward_lock_off"))
         @check(require_admin=True)
         async def forward_unblocking(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "FORWARD_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, "ضدفوروارد از قبل نیز غیرفعال بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "باع، قفل که قبلشم باز بود")
+                await self.bot.reply_to(message, t("forward_lock_off_already" if polite else "forward_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "FORWARD_LOCK", 0)
-                await self.bot.reply_to(message, "ضدفوروارد غیرفعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "انقدر فورواردارو باز کردم تا جر خورد (اوکی)")
+                await self.bot.reply_to(message, t("forward_lock_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل گیف")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "gif_lock_on"))
         @check(require_admin=True)
         async def gif_lock(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "GIF_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, "ضدگیف در حال حاضر نیز فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "خیالت راحت باشه نمیگفتی هم گیفارو پاک میکردم")
+                await self.bot.reply_to(message, t("gif_lock_on_already" if polite else "gif_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "GIF_LOCK", 1)
-                await self.bot.reply_to(message, "ضدگیف فعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "ردیفه ستون اوکیش کردم")
+                await self.bot.reply_to(message, t("gif_lock_on", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن گیف")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "gif_lock_off"))
         @check(require_admin=True)
         async def gif_unlock(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "GIF_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, "ضدگیف از قبل نیز غیرفعال بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "باع، قفل که قبلشم باز بود")
+                await self.bot.reply_to(message, t("gif_lock_off_already" if polite else "gif_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "GIF_LOCK", 0)
-                await self.bot.reply_to(message, "ضدگیف غیرفعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "انقدر گیفارو باز کردم تا جر خورد (اوکی)")
+                await self.bot.reply_to(message, t("gif_lock_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل حمله")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "raid_lock_on"))
         @check(require_admin=True)
         async def raid_lock(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "RAID_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, "ضد حمله در حال حاضر نیز فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "حله دیگه، همونطوریشم فعاله")
+                await self.bot.reply_to(message, t("raid_lock_on_already" if polite else "raid_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "RAID_LOCK", 1)
-                await self.bot.reply_to(message, "ضد حمله فعال شد، ورود انبوه اعضا کنترل می‌شود")
+                await self.bot.reply_to(message, t("raid_lock_on", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن حمله")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "raid_lock_off"))
         @check(require_admin=True)
         async def raid_unlock(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "RAID_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, "ضد حمله از قبل نیز غیرفعال بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "باع، که قبلشم باز بود")
+                await self.bot.reply_to(message, t("raid_lock_off_already" if polite else "raid_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "RAID_LOCK", 0)
-                await self.bot.reply_to(message, "ضد حمله غیرفعال شد")
+                await self.bot.reply_to(message, t("raid_lock_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("تنظیم سقف حمله "))
+        @self.bot.message_handler(func=lambda m: m.text.startswith("تنظیم سقف حمله ") or m.text.lower().startswith("raid threshold "))
         @check(require_admin=True)
         async def raid_threshold(message: types.Message):
-            val = message.text[len("تنظیم سقف حمله "):].strip()
+            lang = await self.get_lang(message.chat.id)
+            if message.text.startswith("تنظیم سقف حمله "):
+                val = message.text[len("تنظیم سقف حمله "):].strip()
+            else:
+                val = message.text[len("raid threshold "):].strip()
             if val.isdigit():
                 await self.db.set_group_setting(message.chat.id, "RAID_THRESHOLD", int(val))
-                await self.bot.reply_to(message, f"سقف ورود انبوه به {val} عضو تنظیم شد")
+                await self.bot.reply_to(message, t("raid_threshold_set", lang, val=val))
             else:
-                await self.bot.reply_to(message, "عدد معتبر وارد کن")
+                await self.bot.reply_to(message, t("invalid_number", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("تنظیم بازه حمله "))
+        @self.bot.message_handler(func=lambda m: m.text.startswith("تنظیم بازه حمله ") or m.text.lower().startswith("raid window "))
         @check(require_admin=True)
         async def raid_window(message: types.Message):
-            val = message.text[len("تنظیم بازه حمله "):].strip()
+            lang = await self.get_lang(message.chat.id)
+            if message.text.startswith("تنظیم بازه حمله "):
+                val = message.text[len("تنظیم بازه حمله "):].strip()
+            else:
+                val = message.text[len("raid window "):].strip()
             if val.isdigit():
                 await self.db.set_group_setting(message.chat.id, "RAID_WINDOW", int(val))
-                await self.bot.reply_to(message, f"بازه تشخیص حمله به {val} ثانیه تنظیم شد")
+                await self.bot.reply_to(message, t("raid_window_set", lang, val=val))
             else:
-                await self.bot.reply_to(message, "عدد معتبر وارد کن")
+                await self.bot.reply_to(message, t("invalid_number", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل کپچا")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "captcha_lock_on"))
         @check(require_admin=True)
         async def captcha_lock(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "CAPTCHA_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, "کپچا در حال حاضر نیز فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "همینطوریشم فعاله کصخل")
+                await self.bot.reply_to(message, t("captcha_lock_on_already" if polite else "captcha_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "CAPTCHA_LOCK", 1)
-                await self.bot.reply_to(message, "کپچا فعال شد؛ اعضای جدید باید برای ورود کپچا حل کنند")
+                await self.bot.reply_to(message, t("captcha_lock_on", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن کپچا")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "captcha_lock_off"))
         @check(require_admin=True)
         async def captcha_unlock(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "CAPTCHA_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, "کپچا از قبل نیز غیرفعال بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "باع، که قبلشم باز بود")
+                await self.bot.reply_to(message, t("captcha_lock_off_already" if polite else "captcha_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "CAPTCHA_LOCK", 0)
-                await self.bot.reply_to(message, "کپچا غیرفعال شد")
+                await self.bot.reply_to(message, t("captcha_lock_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "پنل قفل")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "lock_panel"))
         @check(require_admin=True)
         async def lock_panel(message: types.Message):
             reply_to = message.reply_to_message
@@ -993,62 +1079,81 @@ class KomakYaar():
             lock_keyboard.add(
                 types.InlineKeyboardButton("بستن پنل قفل", callback_data="close_lock_panel")
             )
-            await self.bot.reply_to(message, "از دکمه‌های زیر برای قفل و باز کردن ویژگی‌های مختلف گروه استفاده کنید:", reply_markup=lock_keyboard)
+            lang = await self.get_lang(message.chat.id)
+            await self.bot.reply_to(message, t("lock_panel_desc", lang), reply_markup=lock_keyboard)
 
-        @self.bot.message_handler(func=lambda m: m.text == "پنل")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "panel"))
         @check(require_admin=True)
         async def global_panel(message: types.Message):
             text, kb = await self.build_global_panel(message.chat.id)
             await self.bot.reply_to(message, text, parse_mode="Markdown", reply_markup=kb)
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("دستورات عمومی"))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "public_cmds") is not None or m.text.startswith("دستورات عمومی"))
         @check(require_admin=True)
         async def public_commands(message:types.Message):
-            toggle = message.text.replace("دستورات عمومی", "").strip()
-            if toggle == "روشن":
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
+            remainder = cmd_startswith(message.text, "public_cmds")
+            if remainder is None:
+                remainder = message.text.replace("دستورات عمومی", "").strip()
+            if remainder in ("روشن", "on"):
                 if await self.db.get_group_setting(message.chat.id, "PUBLIC_COMMANDS", 1) == 1:
-                    await self.bot.reply_to(message, "دستورات عمومی از قبل نیز برای همه قابل استفاده بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "همینطوریشم روشنه ستونم")
+                    await self.bot.reply_to(message, t("public_commands_on_already" if polite else "public_commands_on_already_rude", lang))
                     return
                 else:
                     await self.db.set_group_setting(message.chat.id, "PUBLIC_COMMANDS", 1)
-                    await self.bot.reply_to(message, "دستورات عمومی روشن شد")
-            elif toggle == "خاموش":
+                    await self.bot.reply_to(message, t("public_commands_on", lang))
+            elif remainder in ("خاموش", "off"):
                 if await self.db.get_group_setting(message.chat.id, "PUBLIC_COMMANDS", 1) == 0:
-                    await self.bot.reply_to(message, "دستورات عمومی از قبل نیز غیرفعال بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "همینطوریشم خاموشه ستونم")
+                    await self.bot.reply_to(message, t("public_commands_off_already" if polite else "public_commands_off_already_rude", lang))
                     return
                 else:
                     await self.db.set_group_setting(message.chat.id, "PUBLIC_COMMANDS", 0)
-                    await self.bot.reply_to(message, "دستورات عمومی خاموش شد")
+                    await self.bot.reply_to(message, t("public_commands_off", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("مسدود کلمه "))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "block_word") is not None or m.text.startswith("مسدود کلمه "))
         @check(require_admin=True)
         async def block_word(message: types.Message):
-            word = message.text.replace("مسدود کلمه", "").strip()
-            await self.db.block_word(message.chat.id, word)
-            await self.bot.reply_to(message, f"کلمه ی \"{word}\" با موفقیت مسدود شد")
+            lang = await self.get_lang(message.chat.id)
+            remainder = cmd_startswith(message.text, "block_word")
+            if remainder is None:
+                remainder = message.text.replace("مسدود کلمه", "").strip()
+            await self.db.block_word(message.chat.id, remainder)
+            await self.bot.reply_to(message, t("word_blocked", lang, word=remainder))
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("بازکردن کلمه "))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "unblock_word") is not None or m.text.startswith("بازکردن کلمه "))
         @check(require_admin=True)
         async def unblock_word(message: types.Message):
-            word = message.text.replace("بازکردن کلمه", "").strip()
-            await self.db.unblock_word(message.chat.id, word)
-            await self.bot.reply_to(message, f"کلمه ی \"{word}\" با موفقیت از مسدودی خارج شد و کاربران میتوانند آنرا در گروه ارسال کنند")
+            lang = await self.get_lang(message.chat.id)
+            remainder = cmd_startswith(message.text, "unblock_word")
+            if remainder is None:
+                remainder = message.text.replace("بازکردن کلمه", "").strip()
+            await self.db.unblock_word(message.chat.id, remainder)
+            await self.bot.reply_to(message, t("word_unblocked", lang, word=remainder))
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("بلاک بات "))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "block_bot") is not None or m.text.startswith("بلاک بات "))
         @check(require_admin=True)
         async def block_bot_handler(message:types.Message):
-            bot_username = message.text.replace("بلاک بات ", "").strip().replace("@", "")
+            lang = await self.get_lang(message.chat.id)
+            remainder = cmd_startswith(message.text, "block_bot")
+            if remainder is None:
+                remainder = message.text.replace("بلاک بات ", "").strip()
+            bot_username = remainder.replace("@", "")
             await self.db.block_bot(message.chat.id, bot_username)
-            await self.bot.reply_to(message, f"بات {bot_username} بلاک شد")
+            await self.bot.reply_to(message, t("bot_blocked", lang, username=bot_username))
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("آن‌بلاک بات "))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "unblock_bot") is not None or m.text.startswith("آن‌بلاک بات "))
         @check(require_admin=True)
         async def unblock_bot_handler(message: types.Message):
-            bot_username = message.text.replace("آن‌بلاک بات ", "").strip().replace("@", "")
+            lang = await self.get_lang(message.chat.id)
+            remainder = cmd_startswith(message.text, "unblock_bot")
+            if remainder is None:
+                remainder = message.text.replace("آن‌بلاک بات ", "").strip()
+            bot_username = remainder.replace("@", "")
             await self.db.unblock_bot(message.chat.id, bot_username)
-            await self.bot.reply_to(message, f"بات {bot_username} آن‌بلاک شد")
+            await self.bot.reply_to(message, t("bot_unblocked", lang, username=bot_username))
         
-        @self.bot.message_handler(func=lambda m: m.text == "قفل پست")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "post_lock"))
         @check(require_admin=True)
         async def lock_comment_post(message: types.Message):
             reply_to = message.reply_to_message
@@ -1064,12 +1169,15 @@ class KomakYaar():
                         reply_to = None
                         break
             if is_comment:
+                lang = await self.get_lang(message.chat.id)
+                polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE",1)) == 1
                 await self.db.lock_post(message.reply_to_message.chat.id, message.reply_to_message.message_id)
-                await self.bot.reply_to(message, "این پست قفل شده است 🔒\n دیگر اعضای عادی دسترسی ارسال کامنت زیر این پست را ندارد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE",1)) == 1 else "کیر کردم تو این پست حالا خایه داری کامنت بذار این زیر")
+                await self.bot.reply_to(message, t("post_locked" if polite else "post_locked_rude", lang))
             else:
-                await self.bot.reply_to(message, "پیام شما به هیچ پستی اشاره نمیکند، لطفا زیر پستی که میخواهید قفل شود این دستور را کامنت کنید")
+                lang = await self.get_lang(message.chat.id)
+                await self.bot.reply_to(message, t("post_lock_not_comment", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "باز کردن پست")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "post_unlock"))
         @check(require_admin=True)
         async def unlock_comment_post(message: types.Message):
             reply_to = message.reply_to_message
@@ -1085,111 +1193,109 @@ class KomakYaar():
                         reply_to = None
                         break
             if is_comment:
+                lang = await self.get_lang(message.chat.id)
+                polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE",1)) == 1
                 await self.db.unlock_post(message.reply_to_message.chat.id, message.reply_to_message.id)
-                await self.bot.reply_to(message, "پست باز شد 🔓\n دیگر تمامی اعضا قادر به ارسال کامنت زیر این پست خواهند بود" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE",1)) == 1 else "تا کی تبعیض، قفل رو جر دادم برید کامنتارو بگایید")
+                await self.bot.reply_to(message, t("post_unlocked" if polite else "post_unlocked_rude", lang))
             else:
-                await self.bot.reply_to(message, "پیام شما به هیچ پستی اشاره نمیکند، لطفا زیر پستی که میخواهید قفل شود این دستور را کامنت کنید")
+                lang = await self.get_lang(message.chat.id)
+                await self.bot.reply_to(message, t("post_lock_not_comment", lang))
 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل اسپم")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "spam_lock_on"))
         @check(require_admin=True)
         async def spam_lock_on(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "SPAM_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, 
-                    "ضد اسپم از قبل فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل اسپم که قبلاً روشنه کصخل")
+                await self.bot.reply_to(message, t("spam_lock_on_already" if polite else "spam_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "SPAM_LOCK", 1)
-                await self.bot.reply_to(message, 
-                    "✅ قفل اسپم فعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل اسپم روشن شد")
+                await self.bot.reply_to(message, t("spam_lock_on", lang))
 
 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن اسپم")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "spam_lock_off"))
         @check(require_admin=True)
         async def spam_lock_off(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "SPAM_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, 
-                    "ضد اسپم از قبل غیرفعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل اسپم که قبلاً باز بود")
+                await self.bot.reply_to(message, t("spam_lock_off_already" if polite else "spam_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "SPAM_LOCK", 0)
-                await self.bot.reply_to(message, 
-                    "✅ قفل اسپم غیرفعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل اسپم خاموش شد")
+                await self.bot.reply_to(message, t("spam_lock_off", lang))
                 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل فلاد")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "flood_lock_on"))
         @check(require_admin=True)
         async def flood_lock_on(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "FLOOD_LOCK", 0)) == 1:
-                await self.bot.reply_to(message, 
-                    "ضد فلود از قبل فعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل فلود که قبلاً روشنه کصخل")
+                await self.bot.reply_to(message, t("flood_lock_on_already" if polite else "flood_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "FLOOD_LOCK", 1)
-                await self.bot.reply_to(message, 
-                    "✅ قفل فلود فعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل فلود روشن شد")
+                await self.bot.reply_to(message, t("flood_lock_on", lang))
                 
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن فلاد")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "flood_lock_off"))
         @check(require_admin=True)
         async def flood_lock_off(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "FLOOD_LOCK", 0)) == 0:
-                await self.bot.reply_to(message, 
-                    "ضد فلود از قبل غیرفعال است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل فلود که قبلاً باز بود")
+                await self.bot.reply_to(message, t("flood_lock_off_already" if polite else "flood_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "FLOOD_LOCK", 0)
-                await self.bot.reply_to(message, 
-                    "✅ قفل فلود غیرفعال شد" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 
-                    else "قفل فلود خاموش شد")
+                await self.bot.reply_to(message, t("flood_lock_off", lang))
                 
-        @self.bot.message_handler(func=lambda m: m.text == "قفل اینلاین")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "inline_lock_on"))
         @check(require_admin=True)
         async def inline_lock_on(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "INLINE_LOCK", 0)) == 1:
-                await self.bot.reply_to(message,
-                    "قفل اینلاین از قبل فعال بوده" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "قفل اینلاین رو که قبلا روشن کرده بودی کصخل الزایمری"
-                )
+                await self.bot.reply_to(message, t("inline_lock_on_already" if polite else "inline_lock_on_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "INLINE_LOCK", 1)
-                await self.bot.reply_to(message, "قفل اینلاین فعال شد ✅")
+                await self.bot.reply_to(message, t("inline_lock_on", lang))
         
-        @self.bot.message_handler(func=lambda m: m.text == "بازکردن اینلاین")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "inline_lock_off"))
         @check(require_admin=True)
         async def inline_lock_off(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
+            polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
             if int(await self.db.get_group_setting(message.chat.id, "INLINE_LOCK", 0)) == 0:
-                await self.bot.reply_to(message,
-                    "قفل اینلاین از قبل غیرفعال بوده" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "اقا من بعنوان برنامه نویس ناموسا خسته شدم دیگه مغزم نمیکشه چی بنویسم کصخل نباشید دیگه غیرفعال بوده از قبل")
+                await self.bot.reply_to(message, t("inline_lock_off_already" if polite else "inline_lock_off_already_rude", lang))
             else:
                 await self.db.set_group_setting(message.chat.id, "INLINE_LOCK", 0)
-                await self.bot.reply_to(message,
-                    "قفل اینلاین غیرفعال شد ✅")
+                await self.bot.reply_to(message, t("inline_lock_off", lang))
                 
 
-        @self.bot.message_handler(func=lambda m: m.text == "درخواست کمک")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "request_help"))
         @check(require_admin=True)
         async def request_help_group(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
             confirm_keyboard = types.InlineKeyboardMarkup()
-            ok_button = types.InlineKeyboardButton("تایید ✅", callback_data="ok_btn")
-            cancel_button = types.InlineKeyboardButton("لغو ❌", callback_data="cancel_req")
+            ok_button = types.InlineKeyboardButton(t("help_request_confirm_title", lang), callback_data="ok_btn")
+            cancel_button = types.InlineKeyboardButton(t("help_request_cancel_title", lang), callback_data="cancel_req")
             confirm_keyboard.add(ok_button, cancel_button)
-            await self.bot.reply_to(message, "این دستور، درخواستی حاوی لینک گروه به اونر برای ورود و حل مشکل شما ارسال میکند، درصورتی که مشکل شما فوری و بدون جواب داخل راهنماها باشد کمک یار به دستور اونر در گروه از کار خواهد افتاد", reply_markup=confirm_keyboard)
+            await self.bot.reply_to(message, t("help_request_sent", lang), reply_markup=confirm_keyboard)
 
-        @self.bot.message_handler(func=lambda m: m.text == "بات های بلاک شده")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "blocked_bots_list"))
         @check(require_admin=True)
         async def blocked_bots(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
             blocked_bots = await self.db.get_botBlocks(message.chat.id)
             if not blocked_bots:
-                await self.bot.reply_to(message, "هیچ باتی بلاک نشده")
+                await self.bot.reply_to(message, t("no_blocked_bots", lang))
                 return
-            string = "بات های بلاک شده :\n"
+            string = t("blocked_bots_list", lang) + "\n"
             for bot_username in blocked_bots:
                 string += f" - @{bot_username}\n"
             await self.bot.reply_to(message, string)
 
-        @self.bot.message_handler(func=lambda m: m.text == "درخواست برای ورود")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "join_request"))
         @check(require_admin=True)
         async def toggle_request(message:types.Message):
+            lang = await self.get_lang(message.chat.id)
             await self.bot.set_message_reaction(message.chat.id, message.message_id, [types.ReactionTypeEmoji('👍')])
             toggle = bool(int(await self.db.get_group_setting(message.chat.id, "creates_request", 0)))
             markup = types.InlineKeyboardMarkup()
@@ -1199,11 +1305,12 @@ class KomakYaar():
             else:
                 button_on = types.InlineKeyboardButton("روشن کردن", callback_data="request:on")
                 markup.add(button_on)
-            await self.bot.reply_to(message, f'از دکمه ی زیر برای تغییر وضعیت درخواست دعوت استفاده کنید \n وضعیت فعلی : {"روشن" if toggle else "خاموش"}', reply_markup=markup)
+            await self.bot.reply_to(message, t("request_status", lang, status="روشن" if toggle else "خاموش"), reply_markup=markup)
 
-        @self.bot.message_handler(func=lambda m: m.text == "لینک")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "get_link"))
         @check(require_admin=False)
         async def create_invite_link(message):
+            lang = await self.get_lang(message.chat.id)
             try:
                 lnk = await self.bot.create_chat_invite_link(
                     chat_id=message.chat.id,
@@ -1213,28 +1320,30 @@ class KomakYaar():
                 )
                 await self.bot.reply_to(
                     message,
-                    f"🔗 لینک دعوت مخصوص شما:\n{lnk.invite_link}\n📌 ساخته شده توسط کمک‌یـــار"
+                    t("invite_link_created", lang, link=lnk.invite_link)
                 )
-            except:
+            except Exception:
                 await self.bot.reply_to(
                     message,
-                    "ربات دسترسی ساخت لینک ندارد"
+                    t("invite_link_no_permission", lang)
                 )
 
             
 
-        @self.bot.message_handler(func=lambda m: m.text == "فیلترها")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "filters_list"))
         @check(require_admin=False)
         async def all_filters(message:types.Message):
+            lang = await self.get_lang(message.chat.id)
             filters = await self.db.get_tags(message.chat.id)
-            string = "تمامی فیلترها :\n"
+            string = t("filters_list_header", lang) + "\n"
             for filter, response in filters.items():
                 string += f"{filter} : {response}\n"
             await self.bot.reply_to(message, string)
 
-        @self.bot.message_handler(func=lambda m: m.text == "تعیین مجازات اخطار")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "set_warn_punish"))
         @check(require_admin=True)
         async def set_warn_punish(message: types.Message):
+            lang = await self.get_lang(message.chat.id)
             warn_punish = await self.db.get_group_setting(message.chat.id, "WARN_PUNISHMENT", "kick")
             keyboard = types.InlineKeyboardMarkup()
             keyboard.add(
@@ -1242,23 +1351,26 @@ class KomakYaar():
                 types.InlineKeyboardButton(f'بن {"✅" if warn_punish == "ban" else "❌"}', callback_data="warn_punish:ban"),
                 types.InlineKeyboardButton(f'میوت {"✅" if warn_punish == "mute" else "❌"}', callback_data="warn_punish:mute")
             )
-            await self.bot.reply_to(message, "از دکمه‌های زیر برای انتخاب نوع مجازات استفاده کنید", reply_markup=keyboard)
+            await self.bot.reply_to(message, t("warn_punish_select", lang), reply_markup=keyboard)
 
 
-        @self.bot.message_handler(func=lambda m: m.text.startswith("اکو "))
+        @self.bot.message_handler(func=lambda m: cmd_startswith(m.text, "echo") is not None or m.text.startswith("اکو "))
         @check(require_admin=False)
         async def echo_word(message:types.Message):
-            echo = message.text[len("اکو"):].strip()
+            remainder = cmd_startswith(message.text, "echo")
+            if remainder is None:
+                remainder = message.text[len("اکو"):].strip()
             if message.reply_to_message:
-                await self.bot.reply_to(message.reply_to_message, f"{message.from_user.first_name}: \n {echo}")
+                await self.bot.reply_to(message.reply_to_message, t("echo_sent", "en", name=message.from_user.first_name, text=remainder))
             else:
-                await self.bot.send_message(message.chat.id, f"{message.from_user.first_name}: \n {echo}")
+                await self.bot.send_message(message.chat.id, t("echo_sent", "en", name=message.from_user.first_name, text=remainder))
             await self.bot.delete_message(message.chat.id, message.message_id)
 
 
-        @self.bot.message_handler(func=lambda m: m.text == "قوانین")
+        @self.bot.message_handler(func=lambda m: cmd_match(m.text, "rules"))
         async def show_group_rules(message):
-            rules = await self.db.get_group_rules(message.chat.id) or "قانونی برای این گروه ثبت نشده!"
+            lang = await self.get_lang(message.chat.id)
+            rules = await self.db.get_group_rules(message.chat.id) or t("no_rules", lang)
             try:
                 await self.bot.reply_to(message, rules, parse_mode="HTML")
             except ApiTelegramException:
@@ -1272,19 +1384,8 @@ class KomakYaar():
                 return
 
             if message.new_chat_members[0].id == self.me.id:
-                await self.bot.send_message(message.chat.id, f"""سلام رفقا
-من کمک‌یـــارم، یه دستیار مدیریت گروه و یه رفیق باحال برای شما
-از طریق من میتونین به راحتی کاربرا، مدیرا، محتوا و... گروهتون رو مدیریت کنید
-فقط کافیه برای شروع بهم دسترسی های کامل بدید و یه ادمین بگه `فعال شو` تا کارمونو شروع کنیم
-برای دیدن طرز کار با من کلمه ی `راهنما` رو ارسال کنید
-
-پیشنهاد میکنیم برای باخبر شدن از قابلیت های جدید ربات و همچنین گزارش باگ و پیشنهادات، در کانال و گروه کمک یار هم عضو شید :
-کانال : {BOT_CHANNEL}
-گروه : {BOT_GROUP}
-همچنین، من یه ربات متن‌بازم پس میتونید کد منو ببینید و تغییر بدید و استفاده کنید در صورت نام بردن از کمک یار
-لینک پروژه :
-https://github.com/Code-Wizaard/KomakYaar
-                """, parse_mode="Markdown", disable_web_page_preview=True)
+                lang = await self.get_lang(message.chat.id)
+                await self.bot.send_message(message.chat.id, t("welcome_bot_added", lang, channel=BOT_CHANNEL, group=BOT_GROUP), parse_mode="Markdown", disable_web_page_preview=True)
                 return
 
             for user in message.new_chat_members:
@@ -1304,19 +1405,18 @@ https://github.com/Code-Wizaard/KomakYaar
                         except Exception:
                             pass
                         if triggered:
+                            lang = await self.get_lang(message.chat.id)
                             await self.bot.send_message(
                                 message.chat.id,
-                                "🚨 ورود انبوه اعضا (حمله) تشخیص داده شد!\n"
-                                f"اعضای جدید به مدت {mute_minutes} دقیقه سکوت می‌شوند."
+                                t("raid_detected", lang, minutes=mute_minutes)
                             )
                         continue
 
-                if int(await self.db.get_group_setting(message.chat.id, "CAPTCHA_LOCK", 0)) == 1:
-                    if not await self.db.is_admin(message.chat.id, user.id):
-                        key = (message.chat.id, user.id)
-                        if key not in self.captchas:
-                            await self.start_captcha(message, user)
-                        continue
+                if int(await self.db.get_group_setting(message.chat.id, "CAPTCHA_LOCK", 0)) == 1 and not await self.db.is_admin(message.chat.id, user.id):
+                    key = (message.chat.id, user.id)
+                    if key not in self.captchas:
+                        await self.start_captcha(message, user)
+                    continue
 
                 await self.send_welcome(message, user)
 
@@ -1329,10 +1429,10 @@ https://github.com/Code-Wizaard/KomakYaar
             if not query:
                 help_result = types.InlineQueryResultArticle(
                     id="help",
-                    title="راهنمای ارسال نجوا با کمک یار",
-                    description=f"پیام خود را به صورت زیر بنویسید تا پیام خصوصی شما به فرد مورد نظر ارسال شود:\n\n@{self.me.username} <متن پیام> @username",
+                    title=t("whisper_help_title", "en"),
+                    description=t("whisper_help_text", "en", bot=self.me.username),
                     input_message_content=types.InputTextMessageContent(
-                        message_text=f"راهنمای ارسال نجوا با کمک یار\n\nبرای ارسال پیام خصوصی به فردی خاص، می‌توانید از فرمت زیر استفاده کنید:\n\n@{self.me.username} <متن پیام> @username\n\nدر این فرمت، @{self.me.username} نام کاربری ربات است، <متن پیام> محتوای پیامی است که می‌خواهید ارسال کنید، و @username نام کاربری فردی است که می‌خواهید پیام را برای او ارسال کنید."
+                        message_text=t("whisper_help_text", "fa", bot=self.me.username)
                     )
                 )
                 results.append(help_result)
@@ -1348,24 +1448,23 @@ https://github.com/Code-Wizaard/KomakYaar
                     if message_text and target_username:
 
                         if inline_query.chat_type == "private":
-                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text="نمیتوانید در پیوی نجوا ارسال کنید", switch_pm_parameter="invalid_context")
+                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text=t("whisper_cannot_pv", "en"), switch_pm_parameter="invalid_context")
                             return
 
                         elif target_username == inline_query.from_user.username:
-                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text="شما نمی‌توانید به خودتان پیام دهید", switch_pm_parameter="invalid_target")
+                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text=t("whisper_cannot_self", "en"), switch_pm_parameter="invalid_target")
                             return
                         elif target_username == self.me.username:
-                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text="شما نمی‌توانید به خود ربات پیام دهید", switch_pm_parameter="invalid_target")
+                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text=t("whisper_cannot_bot", "en"), switch_pm_parameter="invalid_target")
                             return
                         elif len(message_text) > 200:
-                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text="پیام بسیار طولانی است! محدودیت کاراکتر ارسال نجوا ۲۰۰ کاراکتر")
+                            await self.bot.answer_inline_query(inline_query.id, [], cache_time=0, switch_pm_text=t("whisper_too_long", "en"))
 
                         target = "@" + target_username
-                        target_chat = None
 
                         try:
-                            target_chat = await self.bot.get_chat(target)
-                        except:
+                            await self.bot.get_chat(target)
+                        except Exception:
                             pass
 
 
@@ -1402,7 +1501,7 @@ https://github.com/Code-Wizaard/KomakYaar
                 target_chat = None
                 try:
                     target_chat = await self.bot.get_chat("@" + receiver_username)
-                except:
+                except Exception:
                     pass
                 parts = query.rsplit("@", 1)
                 message_text = parts[0].strip()
@@ -1426,15 +1525,17 @@ https://github.com/Code-Wizaard/KomakYaar
         async def callback_handler(call: types.CallbackQuery):
             try:
                 data = call.data
-                if (data.startswith(("lock_", "post_", "panel_", "request:", "warn_punish:"))
-                        or data in ("close_panel", "close_lock_panel")):
-                    if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(
-                            call.id,
-                            "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف",
-                            show_alert=True,
-                        )
-                        return
+                if ((data.startswith(("lock_", "post_", "panel_", "request:", "warn_punish:"))
+                        or data in ("close_panel", "close_lock_panel"))
+                        and not await self.db.is_admin(call.message.chat.id, call.from_user.id)):
+                    cb_lang = await self.get_lang(call.message.chat.id)
+                    cb_polite = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                    await self.bot.answer_callback_query(
+                        call.id,
+                        t("callback_no_admin" if cb_polite else "callback_no_admin_rude", cb_lang),
+                        show_alert=True,
+                    )
+                    return
                 if data.startswith("captcha:"):
                     parts = data.split(":")
                     if len(parts) == 4:
@@ -1444,8 +1545,9 @@ https://github.com/Code-Wizaard/KomakYaar
                         user_id = call.from_user.id
                         key = (chat_id, user_id)
                         entry = self.captchas.get(key)
+                        cap_lang = await self.get_lang(chat_id)
                         if not entry or entry.get("token") != token:
-                            await self.bot.answer_callback_query(call.id, "کپچا منقضی شده است", show_alert=True)
+                            await self.bot.answer_callback_query(call.id, t("captcha_expired", cap_lang), show_alert=True)
                             return
                         if chosen == entry["answer"]:
                             if entry.get("task"):
@@ -1456,7 +1558,7 @@ https://github.com/Code-Wizaard/KomakYaar
                                 pass
                             self.captchas.pop(key, None)
                             await self.captcha_success(chat_id, user_id, call.from_user.first_name)
-                            await self.bot.answer_callback_query(call.id, "✅ پاسخ درست بود، خوش اومدی!")
+                            await self.bot.answer_callback_query(call.id, t("captcha_correct", cap_lang))
                         else:
                             entry["attempts"] += 1
                             if entry["attempts"] >= 3:
@@ -1472,9 +1574,9 @@ https://github.com/Code-Wizaard/KomakYaar
                                     await self.bot.unban_chat_member(chat_id, user_id)
                                 except Exception:
                                     pass
-                                await self.bot.answer_callback_query(call.id, "پاسخ غلط بود؛ شما از گروه حذف شدید", show_alert=True)
+                                await self.bot.answer_callback_query(call.id, t("captcha_wrong_ban", cap_lang), show_alert=True)
                             else:
-                                await self.bot.answer_callback_query(call.id, f"پاسخ غلط بود! {3 - entry['attempts']} تلاش دیگر باقی مانده", show_alert=True)
+                                await self.bot.answer_callback_query(call.id, t("captcha_wrong", cap_lang, remaining=3 - entry['attempts']), show_alert=True)
                     return
 
                 if data.startswith("showmsg:"):
@@ -1500,7 +1602,9 @@ https://github.com/Code-Wizaard/KomakYaar
 
                 elif data.startswith("lock_"):
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
                     
                     reply_to = call.message.reply_to_message
@@ -1510,20 +1614,23 @@ https://github.com/Code-Wizaard/KomakYaar
                     
                     current_value = int(await self.db.get_group_setting(call.message.chat.id, setting.upper() + "_LOCK", 0))
                     if (current_value == 1 and toggle == "on") or (current_value == 0 and toggle == "off"):
-                        await self.bot.answer_callback_query(call.id, "این ویژگی از قبل نیز در همین وضعیت بود" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "همینطوریشم همینه ستونم")
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("already_in_this_state", lang_cb) if polite_cb else t("already_in_this_state_rude", lang_cb))
                         return
                     
                     await self.db.set_group_setting(call.message.chat.id, setting.upper() + "_LOCK", 1 if toggle == "on" else 0)
                     await self.apply_group_permissions(call.message.chat.id)
                     
                     
-                    locks = {
-                        "swear": "فحش", "link": "لینک", "forward": "فوروارد", "group": "گروه",
-                        "gif": "گیف", "spam": "اسپم", "flood": "فلاد", "inline": "اینلاین",
-                        "raid": "حمله", "captcha": "کپچا"
-                    }
-                    status_text = f"{locks.get(setting, setting)} با موفقیت {'قفل' if toggle == 'on' else 'باز'} شد"
-                    await self.bot.answer_callback_query(call.id, status_text if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else f"ردیفه ستون {locks.get(setting, setting)} رو {'قفل' if toggle == 'on' else 'باز'} کردم")
+                    lang_lock = await self.get_lang(call.message.chat.id)
+                    polite_lock = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                    lock_name = t(f"lock_name_{setting}", lang_lock)
+                    if polite_lock:
+                        status_text = t("lock_status_changed", lang_lock, name=lock_name, status=t("lock_status_locked" if toggle == 'on' else "lock_status_unlocked", lang_lock))
+                    else:
+                        status_text = t("lock_status_changed_rude", lang_lock, name=lock_name, status=t("lock_status_locked" if toggle == 'on' else "lock_status_unlocked", lang_lock))
+                    await self.bot.answer_callback_query(call.id, status_text)
                     
                     
                     origin = self.lock_panel_origin.get(call.message.chat.id)
@@ -1548,16 +1655,17 @@ https://github.com/Code-Wizaard/KomakYaar
                     if is_comment:
                         post_lock = await self.db.post_lock_status(call.message.chat.id, reply_to.message_id)
                         lock_keyboard.add(
-                            types.InlineKeyboardButton("قفل پست ✅" if post_lock else "قفل پست ❌", callback_data="post_" + ("lock" if not post_lock else "unlock"))
+                            types.InlineKeyboardButton(t("panel_post_lock_on", lang_lock) if post_lock else t("panel_post_lock_off", lang_lock), callback_data="post_" + ("lock" if not post_lock else "unlock"))
                         )
                     
-                    lock_keyboard.add(types.InlineKeyboardButton("بستن پنل قفل", callback_data="close_lock_panel"))
+                    lock_keyboard.add(types.InlineKeyboardButton(t("panel_close_lock_panel", lang_lock), callback_data="close_lock_panel"))
                     
                     await self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=lock_keyboard)
 
                 elif data.startswith("post_"):
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید", show_alert=True)
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb), show_alert=True)
                         return
                     reply_to = call.message.reply_to_message
                     is_comment = False
@@ -1579,43 +1687,53 @@ https://github.com/Code-Wizaard/KomakYaar
                         await self.db.lock_post(chat_id, post_id)
                     else:
                         await self.db.unlock_post(chat_id, post_id)
-                    await self.bot.answer_callback_query(call.id, f'قفل پست با موفقیت {"فعال" if status == "lock" else "غیرفعال"} شد ✅')
+                    lang_post = await self.get_lang(call.message.chat.id)
+                    status_label = t("post_lock_activated", lang_post) if status == "lock" else t("post_lock_deactivated", lang_post)
+                    await self.bot.answer_callback_query(call.id, t("post_lock_status_changed", lang_post, status=status_label))
                     lock_keyboard = await self.build_lock_panel(call.message.chat.id)
 
                     if is_comment:
                         post_lock = await self.db.post_lock_status(chat_id, post_id)
                         lock_keyboard.add(
-                            types.InlineKeyboardButton("قفل پست ✅" if post_lock else "قفل پست ❌", callback_data="post_" + "lock" if not post_lock else "unlock")
+                            types.InlineKeyboardButton(t("panel_post_lock_on", lang_post) if post_lock else t("panel_post_lock_off", lang_post), callback_data="post_" + ("lock" if not post_lock else "unlock"))
                         )
                     lock_keyboard.add(
-                        types.InlineKeyboardButton("بستن پنل قفل", callback_data="close_lock_panel")
+                        types.InlineKeyboardButton(t("panel_close_lock_panel", lang_post), callback_data="close_lock_panel")
                     )
                     await self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=lock_keyboard)
 
 
                 elif data == "close_lock_panel":
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
-                    await self.bot.edit_message_text("پنل به دستور مدیر بسته شد!", call.message.chat.id, call.message.message_id)
+                    lang_cp = await self.get_lang(call.message.chat.id)
+                    await self.bot.edit_message_text(t("panel_closed_by_admin", lang_cp), call.message.chat.id, call.message.message_id)
                     await self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
 
                 elif data == "panel_locks":
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
+                    lang_pl = await self.get_lang(call.message.chat.id)
                     lock_kb = await self.open_lock_panel(call.message.chat.id)
                     await self.bot.edit_message_text(
                         chat_id=call.message.chat.id,
                         message_id=call.message.message_id,
-                        text="🔒 **پنل قفل‌ها**\n\nبرای تغییر وضعیت هر قفل روی دکمه‌های زیر بزنید:",
+                        text=t("lock_panel_title_full", lang_pl),
                         parse_mode="Markdown",
                         reply_markup=lock_kb
                     )
 
                 elif data == "panel_main":
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
                     self.lock_panel_origin.pop(call.message.chat.id, None)
                     text, kb = await self.build_global_panel(call.message.chat.id)
@@ -1623,7 +1741,9 @@ https://github.com/Code-Wizaard/KomakYaar
 
                 elif data.startswith("panel_"):
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
                     setting = data.split("_")[1]
                     key = "POLITE_MODE" if setting == "polite" else "PUBLIC_COMMANDS"
@@ -1631,55 +1751,68 @@ https://github.com/Code-Wizaard/KomakYaar
                     await self.db.set_group_setting(call.message.chat.id, key, 0 if current == 1 else 1)
                     text, kb = await self.build_global_panel(call.message.chat.id)
                     await self.bot.edit_message_text(text, call.message.chat.id, call.message.message_id, parse_mode="Markdown", reply_markup=kb)
-                    await self.bot.answer_callback_query(call.id, "تنظیمات به‌روزرسانی شد ✅")
+                    lang_su = await self.get_lang(call.message.chat.id)
+                    await self.bot.answer_callback_query(call.id, t("settings_updated_callback", lang_su))
 
                 elif data == "close_panel":
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
-                    await self.bot.edit_message_text("پنل به دستور مدیر بسته شد!", call.message.chat.id, call.message.message_id)
+                    lang_cp = await self.get_lang(call.message.chat.id)
+                    await self.bot.edit_message_text(t("panel_closed_by_admin", lang_cp), call.message.chat.id, call.message.message_id)
                     await self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
 
                 elif data.startswith("warn_punish:"):
                     punish_type = data.split(":")[1]
                     if not await self.db.is_admin(call.message.chat.id, call.from_user.id):
-                        await self.bot.answer_callback_query(call.id, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else "برو باو بگو بزرگ‌ترت بیاد", show_alert=True)
+                        polite_cb = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
+                        lang_cb = await self.get_lang(call.message.chat.id)
+                        await self.bot.answer_callback_query(call.id, t("callback_no_admin", lang_cb) if polite_cb else t("callback_no_admin_rude", lang_cb), show_alert=True)
                         return
                     await self.db.set_group_setting(call.message.chat.id, "WARN_PUNISHMENT", punish_type)
+                    lang_wp = await self.get_lang(call.message.chat.id)
+                    polite_wp = int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1
                     punish_map = {
-                        "kick": "کیک",
-                        "ban": "بن",
-                        "mute": "میوت"
+                        "kick": t("punishment_kick", lang_wp),
+                        "ban": t("punishment_ban", lang_wp),
+                        "mute": t("punishment_mute", lang_wp),
                     }
-                    await self.bot.answer_callback_query(call.id, f"نوع مجازات اخطار با موفقیت به {punish_map.get(punish_type, punish_type)} تغییر کرد" if int(await self.db.get_group_setting(call.message.chat.id, "POLITE_MODE", 1)) == 1 else f"ردیفه اخطار رو گذاشتم رو {punish_map.get(punish_type, punish_type)}", show_alert=True)
+                    punish_label = punish_map.get(punish_type, punish_type)
+                    if polite_wp:
+                        await self.bot.answer_callback_query(call.id, t("warn_punish_changed", lang_wp, type=punish_label), show_alert=True)
+                    else:
+                        await self.bot.answer_callback_query(call.id, t("warn_punish_changed_rude", lang_wp, type=punish_label), show_alert=True)
                     keyboard = types.InlineKeyboardMarkup()
                     keyboard.add(
-                        types.InlineKeyboardButton(f"کیک {'✅' if punish_type == 'kick' else '❌'}", callback_data="warn_punish:kick"),
-                        types.InlineKeyboardButton(f"بن {'✅' if punish_type == 'ban' else '❌'}", callback_data="warn_punish:ban"),
-                        types.InlineKeyboardButton(f"میوت {'✅' if punish_type == 'mute' else '❌'}", callback_data="warn_punish:mute")
+                        types.InlineKeyboardButton(f"{t('punishment_kick', lang_wp)} {'✅' if punish_type == 'kick' else '❌'}", callback_data="warn_punish:kick"),
+                        types.InlineKeyboardButton(f"{t('punishment_ban', lang_wp)} {'✅' if punish_type == 'ban' else '❌'}", callback_data="warn_punish:ban"),
+                        types.InlineKeyboardButton(f"{t('punishment_mute', lang_wp)} {'✅' if punish_type == 'mute' else '❌'}", callback_data="warn_punish:mute")
                     )
                     await self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=keyboard)
 
                 elif data == "ok_btn":
+                    lang_ok = await self.get_lang(call.message.chat.id)
                     link = await self.bot.create_chat_invite_link(call.message.chat.id, "CREATED FOR OWNER HELP REQUEST", member_limit=1)
                     markup = types.InlineKeyboardMarkup()
-                    goGroup_btn = types.InlineKeyboardButton("رفتن به گروه", link.invite_link)
+                    goGroup_btn = types.InlineKeyboardButton(t("go_to_group", lang_ok), link.invite_link)
                     markup.add(goGroup_btn)
-                    await self.bot.send_message(OWNER_ID, "درخواست کمک از گروهی ارسال شده\n"
-                                     f"نام گروه : {call.message.chat.title}\n"
-                                     f"آیدی گروه : {call.message.chat.id}",
+                    await self.bot.send_message(OWNER_ID, t("help_request_received", lang_ok, title=call.message.chat.title, id=call.message.chat.id),
                                      reply_markup=markup)
-                    await self.bot.edit_message_text("درخواست به اونر ارسال شد! در صورت تایید به گروه عضو خواهد شد", call.message.chat.id, call.message.message_id)
+                    await self.bot.edit_message_text(t("help_request_confirmed_callback", lang_ok), call.message.chat.id, call.message.message_id)
 
                 elif data == "cancel_req":
-                    await self.bot.edit_message_text("این درخواست لغو شده است!", call.message.chat.id, call.message.message_id)
+                    lang_cr = await self.get_lang(call.message.chat.id)
+                    await self.bot.edit_message_text(t("help_request_cancelled_callback", lang_cr), call.message.chat.id, call.message.message_id)
 
                 elif data.startswith("request:"):
                     toggle = data.split(":")[1]
                     if toggle == "on":
                         await self.db.delete_group_setting(call.message.chat.id, "invite_maximum")
                     await self.db.set_group_setting(call.message.chat.id, "creates_request", "1" if toggle == "on" else "0")
-                    await self.bot.answer_callback_query(call.id, "درخواست برای دعوت با موفقیت خاموش شد" if toggle == "off" else "درخواست برای دعوت با موفقیت روشن شد")
+                    lang_rq = await self.get_lang(call.message.chat.id)
+                    await self.bot.answer_callback_query(call.id, t("request_off", lang_rq) if toggle == "off" else t("request_on", lang_rq))
                     await self.bot.delete_message(call.message.chat.id, call.message.message_id)
 
                 elif data.startswith("swear:"):
@@ -1689,10 +1822,21 @@ https://github.com/Code-Wizaard/KomakYaar
                 elif data.startswith("check:"):
                     rep_id = data.split(":")[1]
                     await self.db.check_report(rep_id)
-                    await self.bot.answer_callback_query(call.id, "گزارش با موفقیت توسط شما بررسی شد")
+                    lang_ch = await self.get_lang(call.message.chat.id)
+                    await self.bot.answer_callback_query(call.id, t("report_checked", lang_ch))
                     await self.bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
 
+                elif data.startswith("setlang:"):
+                    lang = data.split(":")[1]
+                    if lang in SUPPORTED_LANGUAGES:
+                        self.user_languages[call.from_user.id] = lang
+                        await self.bot.answer_callback_query(call.id, t("language_set", lang, language=lang))
+                        await self.bot.edit_message_text(t("language_set", lang, language=lang), call.message.chat.id, call.message.message_id)
+                    else:
+                        await self.bot.answer_callback_query(call.id, t("language_invalid", self.get_user_lang(call.from_user.id)), show_alert=True)
+
                 elif data.startswith("help_"):
+                    lang_h = await self.get_lang(call.message.chat.id)
                     if data == "help_main":
                         self.lock_panel_origin.pop(call.message.chat.id, None)
                         await self.bot.edit_message_text(
@@ -1714,17 +1858,17 @@ https://github.com/Code-Wizaard/KomakYaar
                             )
                         else:
                             items = [(sub_title, sub_cb) for sub_cb, sub_title in cat["subs"]]
-                            kb = self.build_pretty_keyboard(items, back_buttons=[("🔙 برگشت به منوی اصلی", "help_main")])
+                            kb = self.build_pretty_keyboard(items, back_buttons=[(t("back_to_menu", lang_h), "help_main")])
                             await self.bot.edit_message_text(
                                 chat_id=call.message.chat.id,
                                 message_id=call.message.message_id,
-                                text=f"📂 **{cat['title']}**\n\nیک موضوع را انتخاب کنید تا راهنمای دقیق همان دستور را ببینید:",
+                                text=f"📂 **{cat['title']}**\n\n{t('guide_select_topic', lang_h)}",
                                 parse_mode="Markdown",
                                 reply_markup=kb
                             )
                     elif data in self.guide_texts:
                         parent = self.guide_sub_parent.get(data, "help_main")
-                        kb = self.build_pretty_keyboard([], back_buttons=[("🔙 برگشت به دسته", parent), ("🔙 برگشت به منوی اصلی", "help_main")])
+                        kb = self.build_pretty_keyboard([], back_buttons=[(t("back_to_category", lang_h), parent), (t("back_to_menu", lang_h), "help_main")])
                         await self.bot.edit_message_text(
                             chat_id=call.message.chat.id,
                             message_id=call.message.message_id,
@@ -1734,7 +1878,7 @@ https://github.com/Code-Wizaard/KomakYaar
                         )
                     await self.bot.answer_callback_query(call.id)
             except Exception as e:
-                error_text = f"callback_handler: {str(e)}\n{traceback.format_exc()}"
+                error_text = f"callback_handler: {e!s}\n{traceback.format_exc()}"
                 await send_error_to_owner(error_text, OWNER_ID, self.bot, "CALLBACK_ERROR")
 
         @self.bot.message_handler(commands=['bangroup'])
@@ -1828,41 +1972,16 @@ https://github.com/Code-Wizaard/KomakYaar
                             f"ارسال موفق: {success} گروه\n"
                             f"خطا یا بلاک شده: {err} گروه")
             except Exception as e:
-                await self.bot.reply_to(message, f"❌ خطا در پخش آپدیت: {str(e)}")
+                await self.bot.reply_to(message, f"❌ خطا در پخش آپدیت: {e!s}")
                 
 
         @self.bot.message_handler(func=lambda m: m.chat.type == "private")
         async def pv_chats(message:types.Message):
             if message.text == "/start":
+                user_lang = self.get_user_lang(message.from_user.id)
                 await self.bot.send_message(
                     message.chat.id,
-                    f"""🌟 به **ربات کمک‌یار** خوش اومدی!
-
-من یه دستیار قدرتمند برای مدیریت گروه‌های تلگرامی هستم.
-
-🚀 **برای شروع کافیه:** 
-1. منو به گروهت اضافه کن
-2. بهم دسترسی ادمین بده
-3. تو گروه دستور `فعال شو` رو بفرست
-
-📊 **قابلیت‌های من:**
-• مدیریت کامل اعضا (اخطار، بن، میوت، کیک)
-• فیلترهای هوشمند و پاسخ خودکار
-• قفل‌های متنوع (لینک، فحش، فوروارد، گیف)
-• سیستم نجوا برای پیام‌های خصوصی
-• گزارش‌دهی و لاگ‌گیری
-• و ده‌ها قابلیت دیگر...
-
-🔗 **لینک‌های مفید:**
-• کد منبع: [گیت‌هاب](https://github.com/Code-Wizaard/KomakYaar)
-• کانال آپدیت: {BOT_CHANNEL}
-• گروه پشتیبانی: {BOT_GROUP}
-
-📖 برای مشاهده راهنما، دکمه `/help` رو بزن.
-
-🎉 نسخه {VERSION}
-
-Made with ❤️ by Code-Wizaard""",
+                    t("start_pv", user_lang, channel=BOT_CHANNEL, group=BOT_GROUP, version=VERSION),
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
                     reply_markup=self.start_keyboard
@@ -1874,20 +1993,32 @@ Made with ❤️ by Code-Wizaard""",
                     parse_mode="Markdown", 
                     reply_markup=self.help_keyboard
                 )
+            elif message.text in ("/language", "/lang", "زبان"):
+                user_lang = self.get_user_lang(message.from_user.id)
+                current = "فارسی (fa)" if user_lang == "fa" else "English (en)"
+                await self.bot.send_message(
+                    message.chat.id,
+                    f"🌐 Current language: {current}\n\n"
+                    f"Choose your language / زبان خود را انتخاب کنید:",
+                    reply_markup=types.InlineKeyboardMarkup().add(
+                        types.InlineKeyboardButton("🇮🇷 فارسی", callback_data="setlang:fa"),
+                        types.InlineKeyboardButton("🇬🇧 English", callback_data="setlang:en"),
+                    )
+                )
+            elif message.text and message.text.startswith("/language ") or (message.text and message.text.startswith("/lang ")):
+                parts = message.text.split()
+                if len(parts) >= 2:
+                    new_lang = parts[1].strip().lower()
+                    if new_lang in SUPPORTED_LANGUAGES:
+                        self.user_languages[message.from_user.id] = new_lang
+                        await self.bot.send_message(message.chat.id, t("language_set", new_lang, language=new_lang))
+                    else:
+                        await self.bot.send_message(message.chat.id, t("language_invalid", self.get_user_lang(message.from_user.id)))
 
         @self.bot.message_handler(commands=['start'], func=lambda m: m.chat.type in ["group", "supergroup"])
         async def group_starts(message: types.Message):
-            await self.bot.reply_to(message, f"""درود و مهر ❤️👋
-من کمک یارم، یه ربات خودمونی همه کاره برای مدیریت انواع گروه ها، از گروه های دوستانه و رفاقتی تا گروه های رسمی و پرجمعیت و همچنین گروه های کامنت
-خیلی خوشحالم که اینجام، اگر دسترسی های ادمین رو بهم دادی، با فرستادن دستور فعال شو من میتونم کارمو شروع کنم
-اگرم تا الان من فعال هستم که چه بهتر، گوش به زنگم
-پیشنهاد میکنم برای باخبر شدن از قابلیت های جدید ربات و همچنین گزارش باگ و پیشنهادات، در کانال و گروه کمک یار هم عضو شید :
-کانال : {BOT_CHANNEL}
-گروه : {BOT_GROUP}
-همچنین اگر دلتون میخواد که یه کمک‌یــــــــار برای خودتون داشته باشید یا روی امنیت چیزایی که استفاده میکنید حساسید، بهتره که بگم کمک‌یـــــار یه ربات کاملا اوپن سورسه و میتونید کدش رو ببینید و اگر تونستید و ایده ای داشتید روش مشارکت کنید
-لینک سورس :
-https://github.com/Code-Wizaard/KomakYaar
-""", disable_web_page_preview=True)
+            lang = await self.get_lang(message.chat.id)
+            await self.bot.reply_to(message, t("welcome_group_start", lang, channel=BOT_CHANNEL, group=BOT_GROUP), disable_web_page_preview=True)
 
         @self.bot.message_handler(func= lambda m: m.from_user and m.from_user.id == OWNER_ID and (m.text or "").startswith("db:"))
         async def execute_to_db(message):
@@ -1931,7 +2062,7 @@ https://github.com/Code-Wizaard/KomakYaar
                 chat = await self.bale_bot.get_chat(target_chat_id)
             except Exception as e:
                 await self.bot.reply_to(message, "چنین کانالی ای وجود ندارد یا من به آن دسترسی ندارم")
-                await send_error_to_owner(f"Error in set_bridge: {str(e)}\n{traceback.format_exc()}", OWNER_ID, self.bot, "SET_BRIDGE_ERROR")
+                await send_error_to_owner(f"Error in set_bridge: {e!s}\n{traceback.format_exc()}", OWNER_ID, self.bot, "SET_BRIDGE_ERROR")
                 return
             await self.db.set_bridge(message.chat.id, target_chat_id)
             await self.bot.reply_to(message, f"پل ارتباطی با کانال {chat.title} با موفقیت تنظیم شد")
@@ -2006,7 +2137,7 @@ https://github.com/Code-Wizaard/KomakYaar
                     input_file = InputFile(downloaded, file_name="voice.ogg")
                     await self.bale_bot.send_voice(bale_chat_id, input_file)
 
-            except Exception as e:
+            except Exception:
                 error_text = f"Telegram → Bale Bridge Error:\n{traceback.format_exc()}"
                 print(error_text)
                 await send_error_to_owner(error_text, OWNER_ID, self.bot, "BRIDGE_TG_TO_BALE")
@@ -2085,9 +2216,9 @@ https://github.com/Code-Wizaard/KomakYaar
                         await self.bot.send_document(telegram_chat_id, document_file, caption=text, parse_mode="Markdown")
 
                     else:
-                        await self.bot.send_message(telegram_chat_id, f"نوع محتوا ناشناخته")
+                        await self.bot.send_message(telegram_chat_id, "نوع محتوا ناشناخته")
                 except Exception as e:
-                    error_text = f"Error in Bale Bridge: {str(e)}\n{traceback.format_exc()}"
+                    error_text = f"Error in Bale Bridge: {e!s}\n{traceback.format_exc()}"
                     await send_error_to_owner(error_text, OWNER_ID, self.bot, "BALE_BRIDGE_ERROR")
 
 
@@ -2102,8 +2233,7 @@ https://github.com/Code-Wizaard/KomakYaar
                 is_comment = False
                 reply_to = message.reply_to_message
                 comment_channel = message.reply_to_message
-                file = open(SWEARS_PATH, "r")
-                swears = []
+                swears: list[str] = []
                 is_swear = False
 
                 
@@ -2112,6 +2242,10 @@ https://github.com/Code-Wizaard/KomakYaar
 
                 if not await self.db.is_group_active(chat_id):
                     return
+
+                # Track message count for stats
+                if user_id and not sender_chat_id and not await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    await self.db.increment_msg_count(chat_id, user_id)
                 
                 if (int(await self.db.get_group_setting(chat_id, "SPAM_LOCK", 0)) == 1 or
                     int(await self.db.get_group_setting(chat_id, "FLOOD_LOCK", 0)) == 1):
@@ -2142,6 +2276,9 @@ https://github.com/Code-Wizaard/KomakYaar
                         except ApiTelegramException:
                             pass
                         self.anti_spam.reset_user(chat_id, user_id)
+                        # Deduct from stats on spam/flood
+                        if user_id and not await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                            await self.db.deduct_msg_count(chat_id, user_id, "spam")
                         user_name = message.from_user.first_name if message.from_user else "کاربر"
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
                             await self.bot.send_message(
@@ -2195,11 +2332,11 @@ https://github.com/Code-Wizaard/KomakYaar
                                 # Try to read as text (fallback to empty if binary)
                                 try:
                                     content = downloaded.decode('utf-8', errors='ignore')
-                                except:
+                                except Exception:
                                     content = str(downloaded)[:10000]  # fallback
 
                                 if content.strip():
-                                    is_malware, prob = self.anti_virus.is_malware(content)
+                                    is_malware, _prob = self.anti_virus.is_malware(content)
                                     
                                     if is_malware:
                                         await self.bot.set_message_reaction(
@@ -2220,7 +2357,7 @@ https://github.com/Code-Wizaard/KomakYaar
                                         [types.ReactionTypeEmoji('❓')] # Not Sure
                                     )
                             except Exception as e:
-                                error_text = f"handle_malwares: {str(e)}\n{traceback.format_exc()}"
+                                error_text = f"handle_malwares: {e!s}\n{traceback.format_exc()}"
                                 await send_error_to_owner(error_text, OWNER_ID, self.bot, "MAIN_ERROR")
                                 await self.bot.set_message_reaction(
                                     chat_id, 
@@ -2240,14 +2377,13 @@ https://github.com/Code-Wizaard/KomakYaar
                             reply_to = None
                             break
 
-                if int(await self.db.get_group_setting(chat_id, "GROUP_LOCK", 0)) == 1:
-                    if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                        await self.bot.delete_message(chat_id, message.message_id)
+                if int(await self.db.get_group_setting(chat_id, "GROUP_LOCK", 0)) == 1 and not await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    await self.bot.delete_message(chat_id, message.message_id)
 
-                if int(await self.db.get_group_setting(chat_id, "GIF_LOCK", 0)) == 1:
-                    if message.content_type == "animation":
-                        if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                            await self.bot.delete_message(chat_id, message.message_id)
+                if (int(await self.db.get_group_setting(chat_id, "GIF_LOCK", 0)) == 1
+                        and message.content_type == "animation"
+                        and not await self.db.is_admin(chat_id, user_id, sender_chat_id)):
+                    await self.bot.delete_message(chat_id, message.message_id)
 
                 if message.via_bot:
                     lock = await self.db.get_group_setting(chat_id, "INLINE_LOCK", 0)
@@ -2269,10 +2405,9 @@ https://github.com/Code-Wizaard/KomakYaar
                     if post:
                         await self.bot.delete_message(message.chat.id, message.message_id)
                     
-                if await self.db.get_group_setting(chat_id, "LINK_LOCK", 0):
-                    if re.search(r"(http|ftp|https):\/\/([\w_-]+(?:(?:\.[\w_-]+)+))([\w.,@?^=%&:\/~+#-]*[\w@?^=%&\/~+#-])", text):
-                        await self.bot.delete_message(chat_id, message.message_id)
-                        return
+                if await self.db.get_group_setting(chat_id, "LINK_LOCK", 0) and re.search(r"(http|ftp|https):\/\/([\w_-]+(?:(?:\.[\w_-]+)+))([\w.,@?^=%&:\/~+#-]*[\w@?^=%&\/~+#-])", text):
+                    await self.bot.delete_message(chat_id, message.message_id)
+                    return
 
                 text_lower = text.lower()
                 tokens_lower = [t.lower() for t in text.split()]
@@ -2294,8 +2429,13 @@ https://github.com/Code-Wizaard/KomakYaar
                         swears.append("swear detected by model")
 
 
-                if (not len(swears) == 0) or is_swear:
-                    await self.bot.reply_to(comment_channel if is_comment else message, f"[{message.from_user.first_name if message.from_user else 'کاربر'}](tg://user?id={user_id}) عزیزم قرار شد دیگه فحش ندیم بیاید باهم دوست باشیم", parse_mode="Markdown")
+                if (len(swears) != 0) or is_swear:
+                    # Deduct from stats on swear
+                    if user_id and not await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        await self.db.deduct_msg_count(chat_id, user_id, "swear")
+                    lang = await self.get_lang(chat_id)
+                    user_name = message.from_user.first_name if message.from_user else ("کاربر" if lang == "fa" else "user")
+                    await self.bot.reply_to(comment_channel if is_comment else message, t("swear_warning", lang, name=user_name, id=user_id), parse_mode="Markdown")
                     await self.bot.delete_message(chat_id, message.message_id)
 
                 toggle = await self.db.get_group_setting(message.chat.id, "PUBLIC_COMMANDS", 1)
@@ -2303,11 +2443,32 @@ https://github.com/Code-Wizaard/KomakYaar
                     return
 
                 if text.startswith("db:"):
-                    await self.bot.reply_to(message, "دوست عزیز، شما اونر نیستید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "گوه نخور بابا این گوزا به تو نیومده")
+                    lang = await self.get_lang(chat_id)
+                    polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
+                    await self.bot.reply_to(message, t("bot_owner_only_tag" if polite else "bot_owner_only_tag_rude", lang))
 
-                if text == "کمک یار" or text == "کمک‌یار":
-                    await self.bot.reply_to(message, f"{message.from_user.first_name if message.from_user else 'کاربر'}")
+                if text in ("کمک یار", "کمک\u200cیار", "komakyaar", "about"):
+                    lang = await self.get_lang(chat_id)
+                    await self.bot.reply_to(message, t("bot_name_reply", lang, name=message.from_user.first_name if message.from_user else ("کاربر" if lang == "fa" else "user")))
 
+                # ===================== LANGUAGE SET (GROUP) =====================
+                if text.startswith(("تنظیم زبان", "set language")):
+                    if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(chat_id, "POLITE_MODE", 1)) == 1
+                        await self.bot.reply_to(message, t("no_admin_permission" if polite else "no_admin_permission_rude", lang))
+                        return
+                    parts = text.split()
+                    if len(parts) >= 3:
+                        new_lang = parts[2].strip().lower()
+                        if new_lang in SUPPORTED_LANGUAGES:
+                            await self.db.set_group_setting(chat_id, "LANGUAGE", new_lang)
+                            await self.bot.reply_to(message, t("language_set_group", new_lang, language=new_lang))
+                        else:
+                            await self.bot.reply_to(message, t("language_invalid", await self.get_lang(chat_id)))
+                    else:
+                        await self.bot.reply_to(message, t("language_invalid", await self.get_lang(chat_id)))
+                    return
 
                 tags = await self.db.get_tags(chat_id)
                 for k, r in tags.items():
@@ -2315,45 +2476,65 @@ https://github.com/Code-Wizaard/KomakYaar
                         await self.bot.reply_to(message, r)
                         break
 
-                if text.startswith("سقف اخطار"):
+                if text.startswith(("سقف اخطار", "set warn max", "warn max")):
+                    lang = await self.get_lang(chat_id)
+                    polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                     if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                        await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "همون سقف تو کونت")
+                        await self.bot.reply_to(message, t("no_admin_permission" if polite else "no_admin_permission_rude", lang))
                         return
-                    words = text.split(" ")
-                    words.remove("سقف")
-                    words.remove("اخطار")
-                    if words[0].isdigit():
-                        digit = convert_digit(words[0])
+                    words = text.split()
+                    num_str = words[-1] if words else ""
+                    if num_str.isdigit():
+                        digit = convert_digit(num_str)
                         await self.db.set_warn_maximum(chat_id, digit)
-                        await self.bot.reply_to(message, "سقف اخطارها با موفقیت تنظیم شد")
+                        await self.bot.reply_to(message, t("warn_max_set", lang))
                     else:
-                        await self.bot.reply_to(message, f"{words[0]} خودتی")
+                        await self.bot.reply_to(message, t("warn_max_invalid", lang, word=num_str))
 
-                if text.startswith("حذف فیلتر"):
+                if text.startswith(("حذف فیلتر", "delete filter", "remove filter")):
+                    lang = await self.get_lang(chat_id)
+                    polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                     if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                        await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "انگشت نکن بیشرف")
+                        await self.bot.reply_to(message, t("callback_no_admin" if polite else "callback_no_admin_rude", lang))
                         return
                     # اگر ریپلای شده روی پیام کلیدواژه
                     if message.reply_to_message:
                         keyword = message.reply_to_message.text.strip()
                     else:
-                        # جدا کردن کلیدواژه از متن: حذف فیلتر <کلیدواژه>
-                        keyword = text[len("حذف فیلتر"):].strip()
+                        # جدا کردن کلیدواژه از متن
+                        keyword = text
+                        for prefix in ("حذف فیلتر", "delete filter", "remove filter"):
+                            if keyword.lower().startswith(prefix):
+                                keyword = keyword[len(prefix):].strip()
+                                break
 
                     if keyword:
                         await self.db.del_tag(chat_id, keyword)
-                        await self.bot.reply_to(message, f"❌ فیلتر '{keyword}' حذف شد")
+                        await self.bot.reply_to(message, t("filter_removed", lang, keyword=keyword))
                     else:
-                        await self.bot.reply_to(message, "⚠️ فرمت درست: حذف فیلتر روی ریپلای یا با نوشتن کلیدواژه")
+                        await self.bot.reply_to(message, t("filter_remove_format", lang))
                     return
 
-                if (message.text.startswith("حذف") and text != "حذف اخطارها"):
+                is_bulk_delete = (
+                    (text.startswith("حذف") and text != "حذف اخطارها")
+                    or text.lower() in ("delete",)
+                    or (text.lower().startswith("delete ") and not text.lower().startswith("delete filter")
+                        and text.lower() not in ("clear warns", "clear warnings"))
+                )
+                if is_bulk_delete:
+                    lang = await self.get_lang(chat_id)
+                    polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                     if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                        await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "امیدوارم از زندگی حذف شی")
+                        await self.bot.reply_to(message, t("no_admin_permission_delete" if polite else "no_admin_permission_delete_rude", lang))
                         return
                     try:
-                        n = int(message.text.replace("حذف", "").strip())
-                    except:
+                        cleaned = text
+                        for prefix in ("حذف", "delete"):
+                            if cleaned.lower().startswith(prefix):
+                                cleaned = cleaned[len(prefix):].strip()
+                                break
+                        n = int(cleaned) if cleaned else 1
+                    except Exception:
                         n = 1
 
                     chat_id = message.chat.id
@@ -2362,9 +2543,9 @@ https://github.com/Code-Wizaard/KomakYaar
                     for i in range(n+1):  # +1 یعنی خود دستور هم پاک بشه
                         try:
                             await self.bot.delete_message(chat_id, start_id - i)
-                        except:
+                        except Exception:
                             err += 1
-                    msg = await self.bot.send_message(chat_id, f"{n-err} با موفقیت حذف شد 🗑️")
+                    msg = await self.bot.send_message(chat_id, t("bulk_deleted", lang, count=n-err))
                     await asyncio.sleep(4)
                     await self.bot.delete_message(msg.chat.id, msg.message_id)
 
@@ -2375,29 +2556,36 @@ https://github.com/Code-Wizaard/KomakYaar
                     target_id = reply_target.id if reply_target else None
 
                     # ADD TAG (فیلتر)
-                    if text.startswith("فیلتر") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    if text.startswith(("فیلتر", "filter")) and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
                         keyword = message.reply_to_message.text.strip()
-                        response = text[len("فیلتر"):].strip()
+                        response = text
+                        for prefix in ("فیلتر", "filter"):
+                            if response.lower().startswith(prefix):
+                                response = response[len(prefix):].strip()
+                                break
                         if keyword and response:
                             await self.db.add_tag(chat_id, keyword, response)
-                            await self.bot.reply_to(message, f"✅ فیلتر اضافه شد!\nکلیدواژه: {keyword}\nپاسخ: {response}")
+                            await self.bot.reply_to(message, t("filter_added", lang, keyword=keyword, response=response))
                         else:
-                            await self.bot.reply_to(message, "⚠️ فرمت درست: ریپلای روی پیام و نوشتن: فیلتر پاسخ")
+                            await self.bot.reply_to(message, t("filter_add_format", lang))
                         return
 
-                    if text == "حذف" and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    if text in ("حذف", "delete") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
                         await self.bot.delete_message(chat_id, message.reply_to_message.message_id)
-                        msg = await self.bot.reply_to(message, "پیام پاک شد 🗑️")
+                        msg = await self.bot.reply_to(message, t("msg_deleted", lang))
                         await asyncio.sleep(4)
                         await self.bot.delete_message(msg.chat.id, msg.message_id)
 
-                    if text == "گزارش":
+                    if text in ("گزارش", "report"):
+                        lang = await self.get_lang(chat_id)
                         admins = await self.bot.get_chat_administrators(chat_id)
-                        msg = await self.bot.reply_to(message, "گزارش با موفقیت ثبت و به ادمین ها اطلاع رسانی شد، به زودی گزارش بررسی میشود")
+                        msg = await self.bot.reply_to(message, t("report_sent", lang))
                         id = await self.db.file_report(chat_id, user_id, target_id, msg.message_id)
                         target = await self.bot.get_chat(target_id)
                         markup = types.InlineKeyboardMarkup()
-                        check_button = types.InlineKeyboardButton("بررسی شد", callback_data=f"check:{id}")
+                        check_button = types.InlineKeyboardButton(t("help_request_confirm_title", lang), callback_data=f"check:{id}")
                         message_btn = types.InlineKeyboardButton("رفتن به پیام", url=f"https://t.me/c/{str(chat_id)[4:]}/{message.reply_to_message.message_id}")
 
                         markup.add(check_button)
@@ -2406,53 +2594,70 @@ https://github.com/Code-Wizaard/KomakYaar
                             if not admin.user.is_bot and admin.user.id != self.me.id:
                                 try:
                                     await self.bot.send_message(admin.user.id, f"گزارش دریافتی از کاربر [{message.from_user.first_name if message.from_user else 'کاربر'}](tg://user?id={user_id}) در گروه با ایدی {chat_id}\n فرد گزارش شده : [{target.first_name}](tg://user?id={target_id})\n متن پیام ارسالی :\n > {message.reply_to_message.text}", reply_markup=markup, parse_mode="Markdown")
-                                except:
+                                except Exception:
                                     pass
 
-                    if text.startswith("ثبت لقب"):
+                    if text.startswith(("ثبت لقب", "set nickname", "set alias")):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not (await self.db.is_admin(chat_id, user_id, sender_chat_id) or target_id == user_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "بدو بینم")
+                            await self.bot.reply_to(message, t("no_admin_permission_alias" if polite else "no_admin_permission_alias_rude", lang))
                             return
-                        alias = text[len("ثبت لقب"):].strip()
+                        alias = text
+                        for prefix in ("ثبت لقب", "set nickname", "set alias"):
+                            if alias.lower().startswith(prefix):
+                                alias = alias[len(prefix):].strip()
+                                break
                         await self.db.set_alias(chat_id, target_id, alias)
-                        await self.bot.reply_to(message, f"لقب {alias} با موفقیت برای این کاربر ثبت شد")
+                        await self.bot.reply_to(message, t("alias_set", lang, alias=alias))
 
-                    if text == "لقب":
+                    if text in ("لقب", "nickname", "alias"):
+                        lang = await self.get_lang(chat_id)
                         alias = await self.db.get_alias(chat_id, target_id).strip()
-                        await self.bot.reply_to(message, f"لقب ثبت شده برای این کاربر :\n {alias}")
+                        await self.bot.reply_to(message, t("alias_get", lang, alias=alias))
 
-                    if text.startswith("ثبت اصل"):
+                    if text.startswith(("ثبت اصل", "set origin")):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not (await self.db.is_admin(chat_id, user_id, sender_chat_id) or target_id == user_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "کیرم تو اصلت")
+                            await self.bot.reply_to(message, t("no_admin_permission_origin" if polite else "no_admin_permission_origin_rude", lang))
                             return
-                        asl = text[len("ثبت اصل"):].strip()
+                        asl = text
+                        for prefix in ("ثبت اصل", "set origin"):
+                            if asl.lower().startswith(prefix):
+                                asl = asl[len(prefix):].strip()
+                                break
                         await self.db.set_asl(chat_id, target_id, asl)
-                        await self.bot.reply_to(message, f"اصل {asl} با موفقیت برای این کاربر ثبت شد")
+                        await self.bot.reply_to(message, t("asl_set", lang, asl=asl))
 
-                    if text == "اصل":
+                    if text in ("اصل", "origin"):
+                        lang = await self.get_lang(chat_id)
                         asl = await self.db.get_asl(chat_id, target_id).strip()
-                        await self.bot.reply_to(message, f"اصل ثبت شده برای این کاربر :\n {asl}")
+                        await self.bot.reply_to(message, t("asl_get", lang, asl=asl))
 
-                    if text == "تنظیم خوشامد" and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    if text in ("تنظیم خوشامد", "set welcome") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
                         await self.db.set_group_welcome(chat_id, message.reply_to_message.text)
-                        await self.bot.reply_to(message, "متن خوشامد گویی ربات با موفقیت تنظیم شد")
+                        await self.bot.reply_to(message, t("welcome_set", lang))
 
-                    if text == "تنظیم قوانین" and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    if text in ("تنظیم قوانین", "set rules") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
                         if message.reply_to_message:
                             rules_html = message.reply_to_message.html_text or message.reply_to_message.text
                             await self.db.set_group_rules(chat_id, rules_html)
-                            await self.bot.reply_to(message, "قوانین گروه با موفقیت تنظیم شد")
+                            await self.bot.reply_to(message, t("rules_set", lang))
                         else:
-                            await self.bot.reply_to(message, "روی پیام قوانین ریپلای کنید")
+                            await self.bot.reply_to(message, t("rules_reply_needed", lang))
 
-                    if text == "تنظیم متن کامنت" and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    if text in ("تنظیم متن کامنت", "set comment") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
                         if message.reply_to_message:
                             await self.db.set_comment_message(chat_id, message.reply_to_message.text)
-                            await self.bot.reply_to(message, "متن کامنت زیر پست ها تغییر پیدا کرد")
+                            await self.bot.reply_to(message, t("comment_set", lang))
                         else:
-                            await self.bot.reply_to(message, "خب دقیقا متن رو به چی تغییر باید بدم :\\")
+                            await self.bot.reply_to(message, t("comment_set_empty", lang))
 
-                    if text == "اطلاعات":
+                    if text in ("اطلاعات", "info"):
                         try:
                             # گرفتن اطلاعات پایه کاربر
                             user = await self.bot.get_chat_member(chat_id, target_id).user
@@ -2494,15 +2699,17 @@ https://github.com/Code-Wizaard/KomakYaar
                             await self.bot.send_message(chat_id, f"❌ خطا در گرفتن اطلاعات کاربر:\n<code>{e}</code>", parse_mode="HTML")
 
                     # MUTE
-                    if (text.startswith("خفه") or text.startswith("سکوت")):
+                    if (text.startswith(("خفه", "سکوت", "mute"))):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "اخه چی بگم من به تو")
+                            await self.bot.reply_to(message, t("no_admin_permission_mute" if polite else "no_admin_permission_mute_rude", lang))
                             return
                         if await self.db.is_admin(chat_id, target_id):
-                            await self.bot.reply_to(message, "دوست عزیز، فرد انتخاب شده ادمین است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "حاجی بی شوخی خیلی کصخلی طرف ادمینه من اینو چیکارش کنم")
+                            await self.bot.reply_to(message, t("target_is_admin" if polite else "target_is_admin_rude", lang))
                             return
                         if target_id == self.me.id:
-                            await self.bot.reply_to(message, "❌ نمی‌توانم خودم را سکوت کنم!" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "چرا انقدر همه با من بد هستند")
+                            await self.bot.reply_to(message, t("muted_self" if polite else "muted_self_rude", lang))
                             return
                         parts = text.split()
                         if len(parts) >= 2 and parts[1].isdigit():
@@ -2511,106 +2718,119 @@ https://github.com/Code-Wizaard/KomakYaar
                                                 until_date=int(time.time()+mins*60),
                                                 can_send_messages=False)
                             await self.db.add_punishment(chat_id, target_id, "mute", int(time.time()+mins*60))
-                            await self.bot.reply_to(message, f"🔇 کاربر سکوت داده شد برای {mins} دقیقه.")
+                            await self.bot.reply_to(message, t("muted_temp", lang, minutes=mins))
                         else:
                             # Permanent mute: covers bare "سکوت", "خفه" and "خفه شو"
                             await self.bot.restrict_chat_member(chat_id, target_id, can_send_messages=False)
                             await self.db.add_punishment(chat_id, target_id, "mute", "0")
-                            await self.bot.reply_to(message, f"🔇 کاربر سکوت داده شد.")
+                            await self.bot.reply_to(message, t("muted_permanent", lang))
 
-                    elif (text.startswith("اخطار")):
+                    elif (text.startswith(("اخطار", "warn"))):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "برنامه نویس : خداوکیلی مغزم گوزید دیگه نمیدونم چی بنویسم")
+                            await self.bot.reply_to(message, t("no_admin_permission_warn" if polite else "no_admin_permission_warn_rude", lang))
                             return
                         if await self.db.is_admin(chat_id, target_id):
-                            await self.bot.reply_to(message, "دوست عزیز، فرد انتخاب شده ادمین است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "اخه کصمغز چرا باید ادمینو اخطار بدم")
+                            await self.bot.reply_to(message, t("target_is_admin" if polite else "target_is_admin_rude", lang))
                             return
                         if target_id == self.me.id:
-                            await self.bot.reply_to(message, "❌ نمی‌توانم خودم را اخطار کنم!" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "به کدامین گناه؟")
+                            await self.bot.reply_to(message, t("warned_self" if polite else "warned_self_rude", lang))
                             return
                         await self.db.warn_user(chat_id, target_id)
                         warns = await self.db.get_user_warnings(chat_id, target_id)
                         warn_max = await self.db.get_group_setting(chat_id, "WARN_MAXIMUM", 3)
-                        await self.bot.reply_to(message, f"کاربر با موفقیت اخطار داده شد! ⚠️\n اخطار های کاربر : {warns}/{warn_max}")
+                        await self.bot.reply_to(message, t("warned", lang, warns=warns, max=warn_max))
                         if int(warns) >= int(warn_max):
                             punish = await self.db.get_group_setting(chat_id, "WARN_PUNISHMENT", "kick")
                             if punish == "kick":
                                 await self.bot.ban_chat_member(chat_id, target_id)
                                 await self.bot.unban_chat_member(chat_id, target_id)
                                 await self.db.add_punishment(chat_id, target_id, "kick")
-                                await self.bot.reply_to(message, "👢 کاربر کیک شد!")
+                                await self.bot.reply_to(message, t("warn_punish_kick_done", lang))
                             elif punish == "ban":
                                 await self.bot.ban_chat_member(chat_id, target_id)
                                 await self.db.add_punishment(chat_id, target_id, "ban")
-                                await self.bot.reply_to(message, "⛔ کاربر بن شد!")
+                                await self.bot.reply_to(message, t("warn_punish_ban_done", lang))
                             elif punish == "mute":
                                 await self.bot.restrict_chat_member(chat_id, target_id, can_send_messages=False)
-                                await self.bot.reply_to(message, "کاربر میوت شد! 🤐")
+                                await self.bot.reply_to(message, t("warn_punish_mute_done", lang))
                             await self.db.remove_all_warns(chat_id, target_id)
 
-                    elif (text == "حذف اخطارها") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    elif text in ("حذف اخطارها", "clear warns", "clear warnings") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if await self.db.is_admin(chat_id, target_id):
-                            await self.bot.reply_to("فرد انتخاب شده ادمین است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "چیزی میزنی؟ اصلا مگه میتونم اخطار بدم که الان میگی حذف اخطار")
+                            await self.bot.reply_to(message, t("target_is_admin" if polite else "target_is_admin_rude", lang))
                             return
                         await self.db.remove_all_warns(chat_id, target_id)
-                        await self.bot.reply_to(message, "شتر دیدی ندیدی! ✅")
+                        await self.bot.reply_to(message, t("warns_cleared", lang))
 
 
 
                     # KICK
-                    elif (text == "ریم" or text == "کیک" or text == "سیک"):
+                    elif text in ("ریم", "کیک", "سیک", "kick"):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "برو تا سیکتو نزدم")
+                            await self.bot.reply_to(message, t("no_admin_permission_kick" if polite else "no_admin_permission_kick_rude", lang))
                             return
                         if await self.db.is_admin(chat_id, target_id):
-                            await self.bot.reply_to(message, "دوست عزیز، فرد انتخاب شده ادمین است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "باشه داداش دوبار الان برات ادمینو کیک میکنم")
+                            await self.bot.reply_to(message, t("target_is_admin" if polite else "kick_admin_rude", lang))
                             return
                         if target_id == self.me.id:
-                            await self.bot.reply_to(message, "❌ نمی‌توانم خودم را کیک کنم!" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "حالا باهم یه چندتا شوخی کردیم چرا میخوای منو کیک کنی")
+                            await self.bot.reply_to(message, t("kicked_self" if polite else "kicked_self_rude", lang))
                             return
                         await self.bot.ban_chat_member(chat_id, target_id)
                         await self.bot.unban_chat_member(chat_id, target_id)
                         await self.db.add_punishment(chat_id, target_id, "kick")
-                        await self.bot.reply_to(message, "👢 کاربر کیک شد!")
+                        await self.bot.reply_to(message, t("kicked", lang))
 
                     # BAN
-                    elif (text == "بن" or text =="سیکتیر"):
+                    elif text in ("بن", "سیکتیر", "ban"):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "کیر شدی بدبخت ادمین نیستی")
+                            await self.bot.reply_to(message, t("no_admin_permission_ban" if polite else "no_admin_permission_ban_rude", lang))
                             return
                         if await self.db.is_admin(chat_id, target_id):
-                            await self.bot.reply_to(message, "دوست عزیز، فرد انتخاب شده ادمین است" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "پاول دوروفم نمیتونه ادمین بن کنه تو دیگه چه انتظاری داری")
+                            await self.bot.reply_to(message, t("target_is_admin" if polite else "ban_admin_rude", lang))
                             return
                         if target_id == self.me.id:
-                            await self.bot.reply_to(message, "❌ نمی‌توانم خودم را بن کنم!" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "عامو تفنگو بگیر اونور به من چیکار داری")
+                            await self.bot.reply_to(message, t("banned_self" if polite else "banned_self_rude", lang))
                             return
                         await self.bot.ban_chat_member(chat_id, target_id)
                         await self.db.add_punishment(chat_id, target_id, "ban")
-                        await self.bot.reply_to(message, "⛔ کاربر بن شد!")
+                        await self.bot.reply_to(message, t("banned", lang))
 
-                    elif (text == "مخفی کاری" or text == "بن+" or text.startswith("سیک مخفی")):
+                    elif text in ("مخفی کاری", "بن+", "silent ban", "ban+") or text.startswith("سیک مخفی"):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
-                            await self.bot.reply_to(message, "دوست عزیز، شما دسترسی ادمین ندارید" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "ببین بچه جون تا نبردمت زیرزمین خونمون برو گمشو")
+                            await self.bot.reply_to(message, t("no_admin_permission_ban_silent" if polite else "no_admin_permission_ban_silent_rude", lang))
                             return
                         if await self.db.is_admin(chat_id, target_id):
-                            await self.bot.reply_to(message, "دوست عزیز، نمیتوانم ادمین هارا بن یا کیک کنم" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "سیشتیر بابا همتون همینو میگید")
+                            await self.bot.reply_to(message, t("ban_silent_admin" if polite else "ban_silent_admin_rude", lang))
                             return
                         if target_id == self.me.id:
-                            await self.bot.reply_to(message, "❌ نمی‌توانم خودم را بن کنم!" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "اگر انقدر از من بدت میاد بگو سیکتیر کن سیکتیر کنم")
+                            await self.bot.reply_to(message, t("banned_self" if polite else "ban_silent_self_rude", lang))
                             return
                         await self.bot.delete_message(chat_id, message.message_id)
                         await self.bot.ban_chat_member(chat_id, target_id)
 
                     # UNBAN
-                    elif (text == "آن‌بن" or text == "آن بن" or text == "ان بن") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    elif text in ("آن‌بن", "آن بن", "ان بن", "unban") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
                         await self.bot.unban_chat_member(chat_id, target_id)
                         await self.db.remove_punishment(chat_id, target_id, "ban")
-                        await self.bot.reply_to(message, "✅ کاربر آن‌بن شد!")
+                        await self.bot.reply_to(message, t("unbanned", lang))
 
                     # UNMUTE
-                    elif (text == "آن‌میوت" or text == "آن میوت" or text == "ان میوت") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                    elif text in ("آن‌میوت", "آن میوت", "ان میوت", "unmute") and await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
+                        polite = int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1
                         if target_id == self.me.id:
-                            await self.bot.reply_to(message, "❌ نمی‌توانم خودم را آن‌میوت کنم!" if int(await self.db.get_group_setting(message.chat.id, "POLITE_MODE", 1)) == 1 else "مشتی منکه میوت نیستم بخوام ان میوت شم")
+                            await self.bot.reply_to(message, t("unmuted_self" if polite else "unmuted_self_rude", lang))
                             return
                         await self.bot.restrict_chat_member(
                             chat_id, 
@@ -2622,17 +2842,67 @@ https://github.com/Code-Wizaard/KomakYaar
                             can_send_other_messages=True
                         )
                         await self.db.remove_punishment(chat_id, target_id, "mute")
-                        await self.bot.reply_to(message, "✅ کاربر آن‌میوت شد!")
+                        await self.bot.reply_to(message, t("unmuted", lang))
 
 
                 if text == "@admins":
                     admins = await self.bot.get_chat_administrators(chat_id)
                     mentions = [f"[{a.user.first_name}](tg://user?id={a.user.id})" for a in admins]
                     await self.bot.send_message(chat_id, " ".join(mentions), parse_mode="Markdown")
+
+                # ===================== STATS =====================
+                if text in ("آمار", "stats"):
+                    lang = await self.get_lang(chat_id)
+                    leaderboard = await self.db.get_leaderboard(chat_id, limit=10)
+                    if not leaderboard:
+                        await self.bot.reply_to(message, t("stats_empty", lang))
+                    else:
+                        header = t("stats_header", lang)
+                        lines = []
+                        for rank, (uid, count) in enumerate(leaderboard, 1):
+                            try:
+                                member = await self.bot.get_chat_member(chat_id, uid)
+                                name = member.user.first_name or str(uid)
+                            except Exception:
+                                name = str(uid)
+                            lines.append(t("stats_entry", lang, rank=rank, name=name, count=count))
+                        await self.bot.reply_to(message, header + "\n".join(lines), parse_mode="Markdown")
+                    return
+
+                if text in ("آمار من", "mystats"):
+                    lang = await self.get_lang(chat_id)
+                    stats = await self.db.get_user_stat(chat_id, user_id)
+                    rank = await self.db.get_user_rank(chat_id, user_id)
+                    if stats["message_count"] > 0 and rank:
+                        await self.bot.reply_to(
+                            message,
+                            t("stats_yours", lang, count=stats["message_count"],
+                              spam_deducted=stats["spam_deducted"],
+                              swear_deducted=stats["swear_deducted"], rank=rank),
+                            parse_mode="Markdown"
+                        )
+                    else:
+                        await self.bot.reply_to(
+                            message,
+                            t("stats_yours_no_rank", lang, count=stats["message_count"],
+                              spam_deducted=stats["spam_deducted"],
+                              swear_deducted=stats["swear_deducted"]),
+                            parse_mode="Markdown"
+                        )
+                    return
+
+                if text in ("ریست آمار", "reset stats"):
+                    if not await self.db.is_admin(chat_id, user_id, sender_chat_id):
+                        lang = await self.get_lang(chat_id)
+                        await self.bot.reply_to(message, t("no_admin_permission", lang))
+                        return
+                    await self.db.reset_stats(chat_id)
+                    lang = await self.get_lang(chat_id)
+                    await self.bot.reply_to(message, t("stats_reset_done", lang))
+                    return
                 
-                file.close()
             except Exception as e:
-                error_text = f"handle_messages: {str(e)}\n{traceback.format_exc()}"
+                error_text = f"handle_messages: {e!s}\n{traceback.format_exc()}"
                 await send_error_to_owner(error_text, OWNER_ID, self.bot, "MAIN_ERROR")
 
     async def run(self):
@@ -2657,11 +2927,11 @@ https://github.com/Code-Wizaard/KomakYaar
                 await telegram_task
 
         except Exception as e:
-            error_text = f"Polling crashed: {str(e)}\n{traceback.format_exc()}"
+            error_text = f"Polling crashed: {e!s}\n{traceback.format_exc()}"
             print(error_text)
             try:
                 await send_error_to_owner(error_text, OWNER_ID, self.bot, "POLLING_CRASH")
-            except:
+            except Exception:
                 pass
     
     async def stop(self):

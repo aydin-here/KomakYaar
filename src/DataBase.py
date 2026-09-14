@@ -1,8 +1,9 @@
 import aiosqlite
+
 from utils import DB_PATH
 
 
-class DataBase():
+class DataBase:
 
     def __init__(self, bot):
         self.bot = bot
@@ -121,7 +122,16 @@ class DataBase():
                 created_at TEXT DEFAULT (datetime('now')),
                 UNIQUE(telegram_channel_id));
             """)
-
+            await con.execute("""
+            CREATE TABLE IF NOT EXISTS message_stats (
+                group_id INTEGER,
+                user_id INTEGER,
+                message_count INTEGER DEFAULT 0,
+                spam_deducted INTEGER DEFAULT 0,
+                swear_deducted INTEGER DEFAULT 0,
+                PRIMARY KEY (group_id, user_id)
+            )
+            """)
 
             await con.commit()
             
@@ -289,7 +299,7 @@ class DataBase():
                 return True
             if sender_chat_id and any(a.user.id == sender_chat_id for a in admins):
                 return True
-        except:
+        except Exception:
             pass
         if sender_chat_id:
             # Anonymous admin posting as the group itself
@@ -299,14 +309,14 @@ class DataBase():
                 member = await self.bot.get_chat_member(group_id, sender_chat_id)
                 if member.status in ["administrator", "creator"]:
                     return True
-            except:
+            except Exception:
                 pass
             # Anonymous posts from the group's linked channel are always admin
             try:
                 chat = await self.bot.get_chat(group_id)
                 if sender_chat_id == getattr(chat, 'linked_chat_id', None):
                     return True
-            except:
+            except Exception:
                 pass
         return False
 
@@ -483,7 +493,7 @@ class DataBase():
             
             cur = await con.execute("SELECT group_id FROM blocked_groups WHERE group_id=?", (group_id,))
             row = await cur.fetchone()
-            return True if row != None else False
+            return row is not None
             
 
     async def blocked_words(self, group_id):
@@ -522,7 +532,7 @@ class DataBase():
             
             cur = await con.execute("SELECT * FROM locked_posts WHERE group_id=? AND post_id=?", (group_id, post_id))
             row = await cur.fetchone()
-            return True if row else False
+            return bool(row)
 
     async def lock_post(self, group_id: int, post_id: int):
         async with self._db() as con:
@@ -578,6 +588,87 @@ class DataBase():
             rows = await con.execute("SELECT telegram_channel_id, bale_channel_id FROM bridge_channels WHERE enabled = 1").fetchall()
         return dict(rows)
 
+    # ===================== STATS =====================
+
+    async def increment_msg_count(self, group_id, user_id):
+        """Increment message count for a user in a group."""
+        async with self._db() as con:
+            cur = await con.execute(
+                "SELECT message_count FROM message_stats WHERE group_id=? AND user_id=?",
+                (group_id, user_id)
+            )
+            row = await cur.fetchone()
+            if row:
+                await con.execute(
+                    "UPDATE message_stats SET message_count = message_count + 1 WHERE group_id=? AND user_id=?",
+                    (group_id, user_id)
+                )
+            else:
+                await con.execute(
+                    "INSERT INTO message_stats (group_id, user_id, message_count) VALUES (?, ?, 1)",
+                    (group_id, user_id)
+                )
+            await con.commit()
+
+    async def deduct_msg_count(self, group_id, user_id, reason):
+        """Deduct a message count and increment the deduction counter. reason is 'spam' or 'swear'."""
+        async with self._db() as con:
+            cur = await con.execute(
+                "SELECT message_count FROM message_stats WHERE group_id=? AND user_id=?",
+                (group_id, user_id)
+            )
+            row = await cur.fetchone()
+            if row:
+                deduct_col = "spam_deducted" if reason == "spam" else "swear_deducted"
+                await con.execute(
+                    f"UPDATE message_stats SET message_count = MAX(0, message_count - 1), {deduct_col} = {deduct_col} + 1 WHERE group_id=? AND user_id=?",
+                    (group_id, user_id)
+                )
+            else:
+                deduct_col = "spam_deducted" if reason == "spam" else "swear_deducted"
+                await con.execute(
+                    f"INSERT INTO message_stats (group_id, user_id, message_count, {deduct_col}) VALUES (?, ?, 0, 1)",
+                    (group_id, user_id)
+                )
+            await con.commit()
+
+    async def get_leaderboard(self, group_id, limit=10):
+        """Get top N active users in a group."""
+        async with self._db() as con:
+            cur = await con.execute(
+                "SELECT user_id, message_count FROM message_stats WHERE group_id=? ORDER BY message_count DESC LIMIT ?",
+                (group_id, limit)
+            )
+            return await cur.fetchall()
+
+    async def get_user_stat(self, group_id, user_id):
+        """Get stats for a specific user."""
+        async with self._db() as con:
+            cur = await con.execute(
+                "SELECT message_count, spam_deducted, swear_deducted FROM message_stats WHERE group_id=? AND user_id=?",
+                (group_id, user_id)
+            )
+            row = await cur.fetchone()
+            if row:
+                return {"message_count": row[0], "spam_deducted": row[1], "swear_deducted": row[2]}
+            return {"message_count": 0, "spam_deducted": 0, "swear_deducted": 0}
+
+    async def get_user_rank(self, group_id, user_id):
+        """Get the rank of a user (1-based) by message count."""
+        async with self._db() as con:
+            cur = await con.execute(
+                "SELECT COUNT(*) + 1 FROM message_stats WHERE group_id=? AND message_count > (SELECT COALESCE(message_count, 0) FROM message_stats WHERE group_id=? AND user_id=?)",
+                (group_id, group_id, user_id)
+            )
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+    async def reset_stats(self, group_id):
+        """Reset all message stats for a group."""
+        async with self._db() as con:
+            await con.execute("DELETE FROM message_stats WHERE group_id=?", (group_id,))
+            await con.commit()
+
     async def update_message(self, updates:list, version:str):
         message = f"*نسخه جدید ربات کمک‌یار (***{version}***) منتشر شد!*\n\n"
         for update in updates:
@@ -593,7 +684,7 @@ class DataBase():
             try:
                 await self.bot.send_message(row[0], message, parse_mode="Markdown")
                 success += 1                
-            except:
+            except Exception:
                 err += 1
                 continue
         return success, err
